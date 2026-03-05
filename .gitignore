@@ -1,0 +1,19 @@
+# Downloaded files
+coins_config.json
+coins.json
+seed-nodes.json
+
+# Generated configuration
+MM2.json
+
+# KDF binary and log
+kdf
+kdf.log
+
+# Debug RPC log
+debug.log
+
+# Build artifacts
+target/
+
+start-kdf.sh

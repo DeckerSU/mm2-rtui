@@ -1,0 +1,66 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug mm2-rtui (External Terminal)",
+            "cargo": {
+                "args": [
+                    "build",
+                    "--bin=mm2-rtui",
+                    "--package=mm2-rtui"
+                ],
+                "filter": {
+                    "name": "mm2-rtui",
+                    "kind": "bin"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}",
+            "console": "externalTerminal",
+            "sourceLanguages": ["rust"],
+            "preLaunchTask": "cargo build"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug mm2-rtui (Integrated Terminal)",
+            "cargo": {
+                "args": [
+                    "build",
+                    "--bin=mm2-rtui",
+                    "--package=mm2-rtui"
+                ],
+                "filter": {
+                    "name": "mm2-rtui",
+                    "kind": "bin"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "sourceLanguages": ["rust"]
+        },
+        {
+            "type": "cppdbg",
+            "request": "launch",
+            "name": "Debug mm2-rtui (GDB - External Terminal)",
+            "program": "${workspaceFolder}/target/debug/mm2-rtui",
+            "args": [],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}",
+            "environment": [],
+            "externalConsole": true,
+            "MIMode": "gdb",
+            "setupCommands": [
+                {
+                    "description": "Enable pretty-printing for gdb",
+                    "text": "-enable-pretty-printing",
+                    "ignoreFailures": true
+                }
+            ],
+            "preLaunchTask": "cargo build"
+        }
+    ]
+}
