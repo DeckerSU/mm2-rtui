@@ -27,6 +27,29 @@ pub enum WalletModalState {
     },
 }
 
+/// State of the withdraw modal: entering address, entering amount, or confirming.
+#[derive(Debug, Clone)]
+pub enum WithdrawModalState {
+    EnteringAddress {
+        ticker: String,
+        address: String,
+    },
+    EnteringAmount {
+        ticker: String,
+        address: String,
+        amount: String,
+    },
+    Confirming {
+        ticker: String,
+        withdraw_result: crate::kdf_client::WithdrawResponse,
+    },
+    Sending,
+    Result {
+        success: bool,
+        message: String,
+    },
+}
+
 /// Lines to scroll per PgUp/PgDn.
 const LOG_PAGE_SIZE: usize = 8;
 /// Visible log lines (log area height minus block borders).
@@ -62,6 +85,8 @@ pub struct App {
     tx_history_loading: bool,
     /// Error message for transaction history.
     tx_history_error: Option<String>,
+    /// Withdraw modal state.
+    withdraw_modal: Option<WithdrawModalState>,
 }
 
 impl App {
@@ -84,6 +109,7 @@ impl App {
             tx_history_total_pages: 0,
             tx_history_loading: false,
             tx_history_error: None,
+            withdraw_modal: None,
         }
     }
 
@@ -400,6 +426,107 @@ impl App {
         }
     }
     
+    // --- Withdraw modal methods ---
+
+    pub fn open_withdraw_modal(&mut self, ticker: String) {
+        self.withdraw_modal = Some(WithdrawModalState::EnteringAddress {
+            ticker,
+            address: String::new(),
+        });
+    }
+
+    pub fn withdraw_modal(&self) -> Option<&WithdrawModalState> {
+        self.withdraw_modal.as_ref()
+    }
+
+    pub fn withdraw_modal_push_char(&mut self, c: char) {
+        match &mut self.withdraw_modal {
+            Some(WithdrawModalState::EnteringAddress { address, .. }) => {
+                address.push(c);
+            }
+            Some(WithdrawModalState::EnteringAmount { amount, .. }) => {
+                // Only allow digits and one dot
+                if c.is_ascii_digit() || (c == '.' && !amount.contains('.')) {
+                    amount.push(c);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    pub fn withdraw_modal_backspace(&mut self) {
+        match &mut self.withdraw_modal {
+            Some(WithdrawModalState::EnteringAddress { address, .. }) => {
+                address.pop();
+            }
+            Some(WithdrawModalState::EnteringAmount { amount, .. }) => {
+                amount.pop();
+            }
+            _ => {}
+        }
+    }
+
+    /// Confirm address entry → move to amount entry. Returns true if transitioned.
+    pub fn withdraw_modal_confirm_address(&mut self) -> bool {
+        if let Some(WithdrawModalState::EnteringAddress { ticker, address }) = self.withdraw_modal.take() {
+            if !address.is_empty() {
+                self.withdraw_modal = Some(WithdrawModalState::EnteringAmount {
+                    ticker,
+                    address,
+                    amount: String::new(),
+                });
+                return true;
+            }
+            // Put it back if address is empty
+            self.withdraw_modal = Some(WithdrawModalState::EnteringAddress { ticker, address });
+        }
+        false
+    }
+
+    /// Confirm amount entry → returns (ticker, address, amount) for withdraw RPC call.
+    pub fn withdraw_modal_confirm_amount(&mut self) -> Option<(String, String, String)> {
+        if let Some(WithdrawModalState::EnteringAmount { ticker, address, amount }) = self.withdraw_modal.take() {
+            if !amount.is_empty() {
+                // Keep modal in a "sending" state while we wait for withdraw RPC
+                self.withdraw_modal = Some(WithdrawModalState::Sending);
+                return Some((ticker, address, amount));
+            }
+            self.withdraw_modal = Some(WithdrawModalState::EnteringAmount { ticker, address, amount });
+        }
+        None
+    }
+
+    /// Set the withdraw confirmation state with the withdraw result.
+    pub fn withdraw_modal_set_confirmation(&mut self, ticker: String, result: crate::kdf_client::WithdrawResponse) {
+        self.withdraw_modal = Some(WithdrawModalState::Confirming {
+            ticker,
+            withdraw_result: result,
+        });
+    }
+
+    /// User confirmed send → returns (ticker, coin, tx_hex) for send_raw_transaction.
+    pub fn withdraw_modal_confirm_send(&mut self) -> Option<(String, String, String)> {
+        if let Some(WithdrawModalState::Confirming { ticker, withdraw_result }) = self.withdraw_modal.take() {
+            self.withdraw_modal = Some(WithdrawModalState::Sending);
+            return Some((ticker, withdraw_result.coin, withdraw_result.tx_hex));
+        }
+        None
+    }
+
+    /// Set the final result of the withdraw (success or error).
+    pub fn withdraw_modal_set_result(&mut self, success: bool, message: String) {
+        self.withdraw_modal = Some(WithdrawModalState::Result { success, message });
+    }
+
+    /// Set error during withdraw preparation.
+    pub fn withdraw_modal_set_error(&mut self, message: String) {
+        self.withdraw_modal = Some(WithdrawModalState::Result { success: false, message });
+    }
+
+    pub fn close_withdraw_modal(&mut self) {
+        self.withdraw_modal = None;
+    }
+
     pub fn render(&self, f: &mut Frame) {
         // Split into: main area, log area, status bar
         let chunks = Layout::default()
@@ -471,7 +598,7 @@ impl App {
         // Right panel top: Details for selected coin
         let details_block = Block::default()
             .borders(Borders::ALL)
-            .title(" Details (R - refresh, I - info) ");
+            .title(" Details (R - refresh, I - info, W - withdraw) ");
         let details_area = details_block.inner(right_chunks[0]);
         f.render_widget(details_block, right_chunks[0]);
         let details_text = self
@@ -892,6 +1019,182 @@ impl App {
                 let para = Paragraph::new(content)
                     .style(Style::default().fg(Color::White));
                 f.render_widget(para, inner);
+            }
+        }
+
+        // Withdraw modal (centered overlay)
+        if let Some(wstate) = &self.withdraw_modal {
+            let area = f.size();
+            let modal_w = 70.min(area.width.saturating_sub(4));
+            let modal_h = 20.min(area.height.saturating_sub(4));
+            let x = area.width.saturating_sub(modal_w) / 2;
+            let y = area.height.saturating_sub(modal_h) / 2;
+            let modal_rect = Rect::new(x, y, modal_w, modal_h);
+
+            f.render_widget(Clear, modal_rect);
+
+            match wstate {
+                WithdrawModalState::EnteringAddress { ticker, address } => {
+                    let block = Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(Color::Yellow))
+                        .title(format!(" Withdraw {} — Enter Address ", ticker));
+                    let inner = block.inner(modal_rect);
+                    f.render_widget(block, modal_rect);
+
+                    let chunks = Layout::default()
+                        .constraints([
+                            Constraint::Length(2),
+                            Constraint::Length(3),
+                            Constraint::Min(0),
+                        ])
+                        .split(inner);
+
+                    let hint = Paragraph::new("Enter the destination address:")
+                        .style(Style::default().fg(Color::Gray));
+                    f.render_widget(hint, chunks[0]);
+
+                    let input = Paragraph::new(address.as_str())
+                        .block(Block::default().borders(Borders::ALL))
+                        .style(Style::default().fg(Color::White));
+                    f.render_widget(input, chunks[1]);
+
+                    let footer = Paragraph::new("Enter — next  |  Esc — cancel")
+                        .style(Style::default().fg(Color::DarkGray));
+                    f.render_widget(footer, chunks[2]);
+                }
+                WithdrawModalState::EnteringAmount { ticker, address, amount } => {
+                    let block = Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(Color::Yellow))
+                        .title(format!(" Withdraw {} — Enter Amount ", ticker));
+                    let inner = block.inner(modal_rect);
+                    f.render_widget(block, modal_rect);
+
+                    let chunks = Layout::default()
+                        .constraints([
+                            Constraint::Length(2),
+                            Constraint::Length(3),
+                            Constraint::Min(0),
+                        ])
+                        .split(inner);
+
+                    let addr_display = format!("To: {}", address);
+                    let info = Paragraph::new(addr_display)
+                        .style(Style::default().fg(Color::Cyan));
+                    f.render_widget(info, chunks[0]);
+
+                    let input = Paragraph::new(amount.as_str())
+                        .block(Block::default().borders(Borders::ALL).title(" Amount "))
+                        .style(Style::default().fg(Color::White));
+                    f.render_widget(input, chunks[1]);
+
+                    let footer = Paragraph::new("Enter — confirm  |  Esc — cancel")
+                        .style(Style::default().fg(Color::DarkGray));
+                    f.render_widget(footer, chunks[2]);
+                }
+                WithdrawModalState::Confirming { ticker, withdraw_result } => {
+                    let block = Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(Color::Red))
+                        .title(format!(" Confirm Withdraw {} ", ticker));
+                    let inner = block.inner(modal_rect);
+                    f.render_widget(block, modal_rect);
+
+                    let to_addr = withdraw_result.to.first().cloned().unwrap_or_default();
+                    let from_addr = withdraw_result.from.first().cloned().unwrap_or_default();
+
+                    // Extract fee info
+                    let fee_display = if let Some(obj) = withdraw_result.fee_details.as_object() {
+                        if let Some(amount) = obj.get("amount") {
+                            format!("{} {}", amount.as_str().unwrap_or(&amount.to_string()),
+                                obj.get("coin").and_then(|c| c.as_str()).unwrap_or(ticker))
+                        } else if let Some(total_fee) = obj.get("total_fee") {
+                            format!("{} {}", total_fee.as_str().unwrap_or(&total_fee.to_string()),
+                                obj.get("coin").and_then(|c| c.as_str()).unwrap_or(ticker))
+                        } else {
+                            withdraw_result.fee_details.to_string()
+                        }
+                    } else {
+                        withdraw_result.fee_details.to_string()
+                    };
+
+                    let lines = vec![
+                        Line::from(""),
+                        Line::from(vec![
+                            Span::styled("  From:   ", Style::default().fg(Color::DarkGray)),
+                            Span::styled(&from_addr, Style::default().fg(Color::White)),
+                        ]),
+                        Line::from(vec![
+                            Span::styled("  To:     ", Style::default().fg(Color::DarkGray)),
+                            Span::styled(&to_addr, Style::default().fg(Color::Cyan)),
+                        ]),
+                        Line::from(vec![
+                            Span::styled("  Amount: ", Style::default().fg(Color::DarkGray)),
+                            Span::styled(
+                                format!("{} {}", withdraw_result.total_amount, ticker),
+                                Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+                            ),
+                        ]),
+                        Line::from(vec![
+                            Span::styled("  Fee:    ", Style::default().fg(Color::DarkGray)),
+                            Span::styled(&fee_display, Style::default().fg(Color::Yellow)),
+                        ]),
+                        Line::from(vec![
+                            Span::styled("  Balance change: ", Style::default().fg(Color::DarkGray)),
+                            Span::styled(&withdraw_result.my_balance_change, Style::default().fg(Color::Red)),
+                        ]),
+                        Line::from(""),
+                        Line::from(""),
+                        Line::from(vec![
+                            Span::styled(
+                                "  Y — SEND TRANSACTION  |  Esc — cancel",
+                                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                            ),
+                        ]),
+                    ];
+
+                    let para = Paragraph::new(lines)
+                        .style(Style::default().fg(Color::White));
+                    f.render_widget(para, inner);
+                }
+                WithdrawModalState::Sending => {
+                    let block = Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(Color::Yellow))
+                        .title(" Withdraw ");
+                    let inner = block.inner(modal_rect);
+                    f.render_widget(block, modal_rect);
+
+                    let para = Paragraph::new("Processing...")
+                        .style(Style::default().fg(Color::Yellow));
+                    f.render_widget(para, inner);
+                }
+                WithdrawModalState::Result { success, message } => {
+                    let color = if *success { Color::Green } else { Color::Red };
+                    let title = if *success { " Withdraw Success " } else { " Withdraw Error " };
+                    let block = Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(color))
+                        .title(title);
+                    let inner = block.inner(modal_rect);
+                    f.render_widget(block, modal_rect);
+
+                    let mut lines = vec![Line::from("")];
+                    for part in message.split('\n') {
+                        lines.push(Line::from(vec![
+                            Span::styled(part.to_string(), Style::default().fg(color)),
+                        ]));
+                    }
+                    lines.push(Line::from(""));
+                    lines.push(Line::from(vec![
+                        Span::styled("Press Esc to close", Style::default().fg(Color::DarkGray)),
+                    ]));
+
+                    let para = Paragraph::new(lines)
+                        .style(Style::default().fg(Color::White));
+                    f.render_widget(para, inner);
+                }
             }
         }
     }

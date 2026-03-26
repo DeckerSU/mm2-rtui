@@ -382,6 +382,110 @@ pub struct MyTxHistoryResponse {
     pub id: Option<Value>,
 }
 
+/// withdraw request (legacy API)
+#[derive(Debug, Serialize)]
+struct WithdrawRequest {
+    method: String,
+    coin: String,
+    to: String,
+    amount: String,
+    userpass: String,
+}
+
+/// withdraw response (legacy API)
+#[derive(Debug, Deserialize, Clone)]
+pub struct WithdrawResponse {
+    pub tx_hex: String,
+    pub tx_hash: String,
+    pub from: Vec<String>,
+    pub to: Vec<String>,
+    pub total_amount: String,
+    pub spent_by_me: String,
+    pub received_by_me: String,
+    pub my_balance_change: String,
+    pub block_height: u64,
+    pub timestamp: i64,
+    pub fee_details: Value,
+    pub coin: String,
+    pub internal_id: String,
+}
+
+pub async fn withdraw(userpass: &str, coin: &str, to: &str, amount: &str) -> Result<WithdrawResponse> {
+    let client = reqwest::Client::new();
+    let request = WithdrawRequest {
+        method: "withdraw".to_string(),
+        coin: coin.to_string(),
+        to: to.to_string(),
+        amount: amount.to_string(),
+        userpass: userpass.to_string(),
+    };
+    let response = client
+        .post(KDF_RPC_URL)
+        .json(&request)
+        .send()
+        .await
+        .context("Failed to send withdraw request to KDF")?;
+    let text = response
+        .text()
+        .await
+        .context("Failed to read withdraw response body")?;
+    log_rpc_response("withdraw", &text);
+    // Check for error response
+    if let Ok(err) = serde_json::from_str::<Value>(&text) {
+        if let Some(error) = err.get("error") {
+            anyhow::bail!("{}", error);
+        }
+    }
+    let body: WithdrawResponse =
+        serde_json::from_str(&text).context("Failed to parse withdraw response from KDF")?;
+    Ok(body)
+}
+
+/// send_raw_transaction request (legacy API)
+#[derive(Debug, Serialize)]
+struct SendRawTransactionRequest {
+    method: String,
+    coin: String,
+    tx_hex: String,
+    userpass: String,
+}
+
+/// send_raw_transaction response (legacy API)
+#[derive(Debug, Deserialize)]
+pub struct SendRawTransactionResponse {
+    pub tx_hash: String,
+}
+
+pub async fn send_raw_transaction(userpass: &str, coin: &str, tx_hex: &str) -> Result<SendRawTransactionResponse> {
+    let client = reqwest::Client::new();
+    let request = SendRawTransactionRequest {
+        method: "send_raw_transaction".to_string(),
+        coin: coin.to_string(),
+        tx_hex: tx_hex.to_string(),
+        userpass: userpass.to_string(),
+    };
+    let response = client
+        .post(KDF_RPC_URL)
+        .json(&request)
+        .send()
+        .await
+        .context("Failed to send send_raw_transaction request to KDF")?;
+    let text = response
+        .text()
+        .await
+        .context("Failed to read send_raw_transaction response body")?;
+    log_rpc_response("send_raw_transaction", &text);
+    // Check for error response
+    if let Ok(err) = serde_json::from_str::<Value>(&text) {
+        if let Some(error) = err.get("error") {
+            anyhow::bail!("{}", error);
+        }
+    }
+    let body: SendRawTransactionResponse =
+        serde_json::from_str(&text).context("Failed to parse send_raw_transaction response from KDF")?;
+    Ok(body)
+}
+
 /// Get transaction history for a coin (API 2.0)
 pub async fn my_tx_history(
     userpass: &str,

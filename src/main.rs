@@ -9,7 +9,7 @@ mod qr_compact;
 use anyhow::Result;
 use app::App;
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind},
+    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -182,7 +182,7 @@ async fn main() -> Result<()> {
     // Setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture, crossterm::event::EnableBracketedPaste)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
     
@@ -306,7 +306,8 @@ async fn main() -> Result<()> {
     execute!(
         terminal.backend_mut(),
         LeaveAlternateScreen,
-        DisableMouseCapture
+        DisableMouseCapture,
+        crossterm::event::DisableBracketedPaste
     )?;
     terminal.show_cursor()?;
     
@@ -370,6 +371,24 @@ async fn run_app<B: Backend>(
                 match event::read()? {
                     Event::Resize(cols, rows) => {
                         last_resize = Some((cols, rows));
+                    }
+                    Event::Paste(text) => {
+                        // Handle bracketed paste (Ctrl+Shift+V in most terminals)
+                        if let Ok(mut app) = app_state.write() {
+                            if app.withdraw_modal().is_some() {
+                                for c in text.chars() {
+                                    if !c.is_control() {
+                                        app.withdraw_modal_push_char(c);
+                                    }
+                                }
+                            } else if matches!(app.wallet_modal(), Some(app::WalletModalState::EnteringPassword { .. })) {
+                                for c in text.chars() {
+                                    if !c.is_control() {
+                                        app.wallet_modal_password_push(c);
+                                    }
+                                }
+                            }
+                        }
                     }
                     Event::Key(key) if key.kind == KeyEventKind::Press => {
                         let key_name = key_code_to_display(key.code);
@@ -565,6 +584,84 @@ async fn run_app<B: Backend>(
                                     _ => {}
                                 }
                                 // Skip default key handling for modal
+                            } else if app.withdraw_modal().is_some() {
+                                match key.code {
+                                    KeyCode::Esc => {
+                                        app.close_withdraw_modal();
+                                    }
+                                    KeyCode::Enter => {
+                                        // Handle Enter based on current withdraw modal state
+                                        match app.withdraw_modal() {
+                                            Some(app::WithdrawModalState::EnteringAddress { .. }) => {
+                                                app.withdraw_modal_confirm_address();
+                                            }
+                                            Some(app::WithdrawModalState::EnteringAmount { .. }) => {
+                                                if let Some((ticker, address, amount)) = app.withdraw_modal_confirm_amount() {
+                                                    drop(app);
+                                                    if let Ok(mut log) = logger.write() {
+                                                        log.info(format!("Withdraw {} {} to {}", amount, ticker, address));
+                                                    }
+                                                    match kdf_client::withdraw(&rpc_password, &ticker, &address, &amount).await {
+                                                        Ok(result) => {
+                                                            if let Ok(mut log) = logger.write() {
+                                                                log.info(format!("Withdraw prepared: tx_hash={}", result.tx_hash));
+                                                            }
+                                                            if let Ok(mut a) = app_state.write() {
+                                                                a.withdraw_modal_set_confirmation(ticker, result);
+                                                            }
+                                                        }
+                                                        Err(e) => {
+                                                            if let Ok(mut log) = logger.write() {
+                                                                log.error(format!("Withdraw failed: {}", e));
+                                                            }
+                                                            if let Ok(mut a) = app_state.write() {
+                                                                a.withdraw_modal_set_error(format!("{}", e));
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+                                    KeyCode::Char('y') | KeyCode::Char('Y') => {
+                                        // Confirm send in Confirming state
+                                        if let Some((ticker, coin, tx_hex)) = app.withdraw_modal_confirm_send() {
+                                            drop(app);
+                                            if let Ok(mut log) = logger.write() {
+                                                log.info(format!("Sending raw transaction for {}...", ticker));
+                                            }
+                                            match kdf_client::send_raw_transaction(&rpc_password, &coin, &tx_hex).await {
+                                                Ok(res) => {
+                                                    if let Ok(mut log) = logger.write() {
+                                                        log.info(format!("Transaction sent! tx_hash: {}", res.tx_hash));
+                                                    }
+                                                    if let Ok(mut a) = app_state.write() {
+                                                        a.withdraw_modal_set_result(
+                                                            true,
+                                                            format!("Transaction sent successfully!\n\n{}", res.tx_hash),
+                                                        );
+                                                    }
+                                                }
+                                                Err(e) => {
+                                                    if let Ok(mut log) = logger.write() {
+                                                        log.error(format!("send_raw_transaction failed: {}", e));
+                                                    }
+                                                    if let Ok(mut a) = app_state.write() {
+                                                        a.withdraw_modal_set_result(false, format!("Send failed: {}", e));
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                        app.withdraw_modal_push_char(c);
+                                    }
+                                    KeyCode::Backspace => {
+                                        app.withdraw_modal_backspace();
+                                    }
+                                    _ => {}
+                                }
                             } else {
                                 match key.code {
                                     KeyCode::Char('q') | KeyCode::Char('Q') => {
@@ -794,6 +891,12 @@ async fn run_app<B: Backend>(
                             // Open information modal for selected coin
                             if app.coins_selected_index().is_some() {
                                 app.open_info_modal();
+                            }
+                        }
+                        KeyCode::Char('w') | KeyCode::Char('W') => {
+                            // Open withdraw modal for selected coin
+                            if let Some(ticker) = app.selected_coin_ticker() {
+                                app.open_withdraw_modal(ticker);
                             }
                         }
                         KeyCode::Esc => {
