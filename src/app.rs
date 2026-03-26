@@ -50,6 +50,74 @@ pub enum WithdrawModalState {
     },
 }
 
+/// State for the coin activation selection modal.
+#[derive(Debug, Clone)]
+pub struct CoinSelectModal {
+    /// All UTXO coins available for activation.
+    pub all_coins: Vec<crate::coins::CoinEntry>,
+    /// Filter text (starts-with match on ticker).
+    pub filter: String,
+    /// Currently highlighted index in the filtered list.
+    pub selected_index: usize,
+    /// Set of tickers selected for activation.
+    pub selected_tickers: std::collections::HashSet<String>,
+}
+
+impl CoinSelectModal {
+    pub fn new(all_coins: Vec<crate::coins::CoinEntry>) -> Self {
+        Self {
+            all_coins,
+            filter: String::new(),
+            selected_index: 0,
+            selected_tickers: std::collections::HashSet::new(),
+        }
+    }
+
+    /// Return filtered coin list based on the current filter.
+    pub fn filtered(&self) -> Vec<&crate::coins::CoinEntry> {
+        let f = self.filter.to_uppercase();
+        self.all_coins
+            .iter()
+            .filter(|c| f.is_empty() || c.ticker.to_uppercase().starts_with(&f))
+            .collect()
+    }
+
+    pub fn move_up(&mut self) {
+        self.selected_index = self.selected_index.saturating_sub(1);
+    }
+
+    pub fn move_down(&mut self) {
+        let max = self.filtered().len().saturating_sub(1);
+        self.selected_index = (self.selected_index + 1).min(max);
+    }
+
+    /// Toggle selection of the currently highlighted coin.
+    pub fn toggle_selected(&mut self) {
+        let filtered = self.filtered();
+        if let Some(entry) = filtered.get(self.selected_index) {
+            let ticker = entry.ticker.clone();
+            if !self.selected_tickers.remove(&ticker) {
+                self.selected_tickers.insert(ticker);
+            }
+        }
+    }
+
+    pub fn push_filter_char(&mut self, c: char) {
+        self.filter.push(c);
+        self.selected_index = 0;
+    }
+
+    pub fn filter_backspace(&mut self) {
+        self.filter.pop();
+        self.selected_index = 0;
+    }
+
+    /// Return tickers selected for activation.
+    pub fn get_selected_tickers(&self) -> Vec<String> {
+        self.selected_tickers.iter().cloned().collect()
+    }
+}
+
 /// Lines to scroll per PgUp/PgDn.
 const LOG_PAGE_SIZE: usize = 8;
 /// Visible log lines (log area height minus block borders).
@@ -87,6 +155,8 @@ pub struct App {
     tx_history_error: Option<String>,
     /// Withdraw modal state.
     withdraw_modal: Option<WithdrawModalState>,
+    /// Coin activation selection modal.
+    coin_select_modal: Option<CoinSelectModal>,
 }
 
 impl App {
@@ -110,6 +180,7 @@ impl App {
             tx_history_loading: false,
             tx_history_error: None,
             withdraw_modal: None,
+            coin_select_modal: None,
         }
     }
 
@@ -527,6 +598,39 @@ impl App {
         self.withdraw_modal = None;
     }
 
+    // --- Coin select modal methods ---
+
+    pub fn open_coin_select_modal(&mut self, coins: Vec<crate::coins::CoinEntry>) {
+        // Filter out already-active coins
+        let active_tickers: std::collections::HashSet<&str> =
+            self.coins.iter().map(|c| c.ticker.as_str()).collect();
+        let available: Vec<_> = coins
+            .into_iter()
+            .filter(|c| !active_tickers.contains(c.ticker.as_str()))
+            .collect();
+        self.coin_select_modal = Some(CoinSelectModal::new(available));
+    }
+
+    pub fn coin_select_modal(&self) -> Option<&CoinSelectModal> {
+        self.coin_select_modal.as_ref()
+    }
+
+    pub fn coin_select_modal_mut(&mut self) -> Option<&mut CoinSelectModal> {
+        self.coin_select_modal.as_mut()
+    }
+
+    /// Close modal and return selected tickers (if Enter pressed).
+    pub fn coin_select_modal_confirm(&mut self) -> Vec<String> {
+        if let Some(modal) = self.coin_select_modal.take() {
+            return modal.get_selected_tickers();
+        }
+        Vec::new()
+    }
+
+    pub fn close_coin_select_modal(&mut self) {
+        self.coin_select_modal = None;
+    }
+
     pub fn render(&self, f: &mut Frame) {
         // Split into: main area, log area, status bar
         let chunks = Layout::default()
@@ -550,7 +654,7 @@ impl App {
             .split(main_chunks[1]);
         let coins_block = Block::default()
             .borders(Borders::ALL)
-            .title(" Coins (↑/↓ Enter) ");
+            .title(" Coins (↑/↓ Enter, + activate) ");
         let coins_area = coins_block.inner(main_chunks[0]);
         f.render_widget(coins_block, main_chunks[0]);
         let list_width = coins_area.width as usize;
@@ -1020,6 +1124,85 @@ impl App {
                     .style(Style::default().fg(Color::White));
                 f.render_widget(para, inner);
             }
+        }
+
+        // Coin activation selection modal (centered overlay)
+        if let Some(modal) = &self.coin_select_modal {
+            let area = f.size();
+            let modal_w = 60.min(area.width.saturating_sub(4));
+            let modal_h = 30.min(area.height.saturating_sub(4));
+            let x = area.width.saturating_sub(modal_w) / 2;
+            let y = area.height.saturating_sub(modal_h) / 2;
+            let modal_rect = Rect::new(x, y, modal_w, modal_h);
+
+            f.render_widget(Clear, modal_rect);
+
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Cyan))
+                .title(" Activate Coins (Space=toggle, Enter=confirm, Esc=cancel) ");
+            let inner = block.inner(modal_rect);
+            f.render_widget(block, modal_rect);
+
+            let chunks = Layout::default()
+                .constraints([
+                    Constraint::Length(3),
+                    Constraint::Length(1),
+                    Constraint::Min(1),
+                ])
+                .split(inner);
+
+            // Filter input
+            let filter_block = Block::default()
+                .borders(Borders::ALL)
+                .title(" Filter (starts with) ");
+            let filter_text = Paragraph::new(modal.filter.as_str())
+                .block(filter_block)
+                .style(Style::default().fg(Color::White));
+            f.render_widget(filter_text, chunks[0]);
+
+            // Selected count
+            let count_text = format!(
+                " {} coin(s) selected",
+                modal.selected_tickers.len()
+            );
+            let count_para = Paragraph::new(count_text)
+                .style(Style::default().fg(Color::Yellow));
+            f.render_widget(count_para, chunks[1]);
+
+            // Coin list
+            let filtered = modal.filtered();
+            let items: Vec<ListItem> = filtered
+                .iter()
+                .enumerate()
+                .map(|(i, entry)| {
+                    let selected = modal.selected_tickers.contains(&entry.ticker);
+                    let marker = if selected { "[x]" } else { "[ ]" };
+                    let style = if i == modal.selected_index {
+                        if selected {
+                            Style::default().fg(Color::Green).add_modifier(Modifier::BOLD | Modifier::REVERSED)
+                        } else {
+                            Style::default().add_modifier(Modifier::REVERSED)
+                        }
+                    } else if selected {
+                        Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(Color::White)
+                    };
+                    let text = format!("{} {:10} {}", marker, entry.ticker, entry.fname);
+                    ListItem::new(text).style(style)
+                })
+                .collect();
+
+            let mut list_state = ListState::default();
+            if !filtered.is_empty() {
+                list_state.select(Some(modal.selected_index));
+            }
+
+            let list = List::new(items)
+                .block(Block::default().borders(Borders::NONE))
+                .highlight_spacing(HighlightSpacing::Always);
+            f.render_stateful_widget(list, chunks[2], &mut list_state);
         }
 
         // Withdraw modal (centered overlay)

@@ -584,6 +584,88 @@ async fn run_app<B: Backend>(
                                     _ => {}
                                 }
                                 // Skip default key handling for modal
+                            } else if app.coin_select_modal().is_some() {
+                                match key.code {
+                                    KeyCode::Esc => {
+                                        app.close_coin_select_modal();
+                                    }
+                                    KeyCode::Up => {
+                                        if let Some(m) = app.coin_select_modal_mut() {
+                                            m.move_up();
+                                        }
+                                    }
+                                    KeyCode::Down => {
+                                        if let Some(m) = app.coin_select_modal_mut() {
+                                            m.move_down();
+                                        }
+                                    }
+                                    KeyCode::Char(' ') => {
+                                        if let Some(m) = app.coin_select_modal_mut() {
+                                            m.toggle_selected();
+                                        }
+                                    }
+                                    KeyCode::Enter => {
+                                        let selected = app.coin_select_modal_confirm();
+                                        if !selected.is_empty() {
+                                            drop(app);
+                                            if let Ok(mut log) = logger.write() {
+                                                log.info(format!("Activating {} coin(s): {:?}", selected.len(), selected));
+                                            }
+                                            let coins_config_path = workspace_path.join("coins_config.json");
+                                            match coins::load_utxo_coins_from_config_owned(&coins_config_path, &selected) {
+                                                Ok(list) => {
+                                                    for (coin, params) in list {
+                                                        let ticker = coin.ticker.clone();
+                                                        if let Ok(mut a) = app_state.write() {
+                                                            a.add_coin(coin);
+                                                        }
+                                                        if let Ok(mut log) = logger.write() {
+                                                            log.info(format!("Activating UTXO coin: {}", ticker));
+                                                        }
+                                                        match kdf_client::task_enable_utxo_init(
+                                                            &rpc_password,
+                                                            &ticker,
+                                                            params,
+                                                        )
+                                                        .await
+                                                        {
+                                                            Ok(res) => {
+                                                                let task_id = res.result.task_id;
+                                                                if let Ok(mut a) = app_state.write() {
+                                                                    a.add_pending_task(task_id, ticker.clone());
+                                                                }
+                                                                if let Ok(mut log) = logger.write() {
+                                                                    log.info(format!("task_id {} for {}", task_id, ticker));
+                                                                }
+                                                            }
+                                                            Err(e) => {
+                                                                if let Ok(mut log) = logger.write() {
+                                                                    log.error(format!("task::enable_utxo::init {}: {}", ticker, e));
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                                Err(e) => {
+                                                    if let Ok(mut log) = logger.write() {
+                                                        log.error(format!("Loading coins_config for activation: {}", e));
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    KeyCode::Backspace => {
+                                        if let Some(m) = app.coin_select_modal_mut() {
+                                            m.filter_backspace();
+                                        }
+                                    }
+                                    KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                        if let Some(m) = app.coin_select_modal_mut() {
+                                            m.push_filter_char(c);
+                                        }
+                                    }
+                                    _ => {}
+                                }
                             } else if app.withdraw_modal().is_some() {
                                 match key.code {
                                     KeyCode::Esc => {
@@ -897,6 +979,21 @@ async fn run_app<B: Backend>(
                             // Open withdraw modal for selected coin
                             if let Some(ticker) = app.selected_coin_ticker() {
                                 app.open_withdraw_modal(ticker);
+                            }
+                        }
+                        KeyCode::Char('+') | KeyCode::Char('=') => {
+                            // Open coin activation modal
+                            let coins_json_path = workspace_path.join("coins.json");
+                            match coins::load_utxo_coin_list(&coins_json_path) {
+                                Ok(coin_list) => {
+                                    app.open_coin_select_modal(coin_list);
+                                }
+                                Err(e) => {
+                                    drop(app);
+                                    if let Ok(mut log) = logger.write() {
+                                        log.error(format!("Failed to load coins.json: {}", e));
+                                    }
+                                }
                             }
                         }
                         KeyCode::Esc => {

@@ -9,6 +9,38 @@ use std::path::Path;
 /// Default tickers to activate when KDF is ready.
 pub const DEFAULT_TICKERS: &[&str] = &["KMD", "BTC"];
 
+/// Minimal coin info from coins.json for the activation picker.
+#[derive(Debug, Clone)]
+pub struct CoinEntry {
+    pub ticker: String,
+    pub fname: String,
+}
+
+/// Load all UTXO coins from coins.json (the array file, not coins_config.json).
+/// Returns a sorted list of (ticker, friendly name) for coins with protocol.type == "UTXO".
+pub fn load_utxo_coin_list(coins_json_path: &Path) -> Result<Vec<CoinEntry>> {
+    let content = std::fs::read_to_string(coins_json_path)
+        .context("Failed to read coins.json")?;
+    let arr: Vec<Value> = serde_json::from_str(&content).context("Failed to parse coins.json")?;
+    let mut out = Vec::new();
+    for obj in &arr {
+        let proto_type = obj
+            .get("protocol")
+            .and_then(|p| p.get("type"))
+            .and_then(|t| t.as_str())
+            .unwrap_or("");
+        if proto_type == "UTXO" {
+            let ticker = obj.get("coin").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let fname = obj.get("fname").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            if !ticker.is_empty() {
+                out.push(CoinEntry { ticker, fname });
+            }
+        }
+    }
+    out.sort_by(|a, b| a.ticker.cmp(&b.ticker));
+    Ok(out)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CoinType {
     UTXO,
@@ -113,6 +145,15 @@ struct CoinConfigRaw {
     wiftype: Option<u8>,
     #[serde(default)]
     overwintered: Option<u8>,
+}
+
+/// Load coins_config.json and return configs for the given tickers (owned strings).
+pub fn load_utxo_coins_from_config_owned(
+    coins_config_path: &Path,
+    tickers: &[String],
+) -> Result<Vec<(Coin, Value)>> {
+    let refs: Vec<&str> = tickers.iter().map(|s| s.as_str()).collect();
+    load_utxo_coins_from_config(coins_config_path, &refs)
 }
 
 /// Load coins_config.json and return configs for the given tickers.
