@@ -4,13 +4,13 @@ use std::path::{Path, PathBuf};
 use tokio::fs;
 use crate::logger::SharedLogger;
 
-const COINS_CONFIG_URL: &str = "https://raw.githubusercontent.com/KomodoPlatform/coins/refs/heads/master/utils/coins_config_unfiltered.json";
-const COINS_URL: &str = "https://raw.githubusercontent.com/KomodoPlatform/coins/refs/heads/master/coins";
-const SEED_NODES_URL: &str = "https://raw.githubusercontent.com/KomodoPlatform/coins/refs/heads/master/seed-nodes.json";
+const COINS_CONFIG_URL: &str = "https://raw.githubusercontent.com/GLEECBTC/coins/refs/heads/master/utils/coins_config_unfiltered.json";
+const COINS_URL: &str = "https://raw.githubusercontent.com/GLEECBTC/coins/refs/heads/master/coins";
+const SEED_NODES_URL: &str = "https://raw.githubusercontent.com/GLEECBTC/coins/refs/heads/master/seed-nodes.json";
 
-const COINS_CONFIG_ALT_URL: &str = "https://komodoplatform.github.io/coins/utils/coins_config_unfiltered.json";
-const COINS_ALT_URL: &str = "https://komodoplatform.github.io/coins/coins";
-const SEED_NODES_ALT_URL: &str = "https://komodoplatform.github.io/coins/seed-nodes.json";
+const COINS_CONFIG_ALT_URL: &str = "https://gleecbtc.github.io/coins/utils/coins_config_unfiltered.json";
+const COINS_ALT_URL: &str = "https://gleecbtc.github.io/coins/coins";
+const SEED_NODES_ALT_URL: &str = "https://gleecbtc.github.io/coins/seed-nodes.json";
 
 pub async fn ensure_required_files(workspace_path: &Path, logger: &SharedLogger) -> Result<()> {
     // Check and download coins_config.json
