@@ -1051,7 +1051,8 @@ impl App {
                     let prompt = Paragraph::new("Wallet Password:")
                         .style(Style::default().fg(Color::Gray));
                     f.render_widget(prompt, chunks[1]);
-                    let input = Paragraph::new(password.as_str())
+                    let masked = "█".repeat(password.chars().count());
+                    let input = Paragraph::new(masked)
                         .block(Block::default().borders(Borders::ALL))
                         .style(Style::default().fg(Color::White));
                     f.render_widget(input, chunks[2]);
