@@ -171,7 +171,7 @@ pub async fn setup_mm2_config(mm2_path: &PathBuf, workspace_path: &Path, logger:
         "mm2": 1,
         "gui": "mm2-rtui",
         "rpcport": 7783,
-        "netid": 8762,
+        "netid": 8762, // 6133
         "https": false,
         "wallet_name": null,
         "wallet_password": null,

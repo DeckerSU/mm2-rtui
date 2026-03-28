@@ -448,6 +448,7 @@ async fn run_app<B: Backend>(
                                     KeyCode::Enter => {
                                         let submitted = if matches!(app.wallet_modal(), Some(app::WalletModalState::Selecting { .. }) ) {
                                             app.wallet_modal_confirm_selection();
+                                            app.set_mask_keys(true);
                                             None
                                         } else if matches!(app.wallet_modal(), Some(app::WalletModalState::EnteringPassword { .. }) ) {
                                             app.wallet_modal_submit_password()
@@ -455,6 +456,7 @@ async fn run_app<B: Backend>(
                                             None
                                         };
                                         if let Some((name, pass, enable_hd, names)) = submitted {
+                                            app.set_mask_keys(false);
                                             drop(app);
                                             if let Ok(mut log) = logger.write() {
                                                 log.info(format!("Selected wallet: {} | enable_hd: {}", name, enable_hd));
@@ -616,7 +618,7 @@ async fn run_app<B: Backend>(
                                             }
                                         }
                                     }
-                                    KeyCode::Esc => app.wallet_modal_close(),
+                                    KeyCode::Esc => { app.wallet_modal_close(); app.set_mask_keys(false); }
                                     KeyCode::Char(c) => app.wallet_modal_password_push(c),
                                     KeyCode::Backspace => app.wallet_modal_password_backspace(),
                                     _ => {}

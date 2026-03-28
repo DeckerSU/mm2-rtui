@@ -222,6 +222,8 @@ pub struct App {
     log_follow: bool,
     /// Last key pressed (for status bar feedback).
     last_key_pressed: String,
+    /// When true, show * in status bar instead of the actual key (e.g. during password entry).
+    mask_keys: bool,
     /// Wallet selection modal: list of names and password input.
     wallet_modal: Option<WalletModalState>,
     /// Active coins and their balances (left panel).
@@ -276,6 +278,7 @@ impl App {
             log_list_state: Arc::new(Mutex::new(ListState::default())),
             log_follow: true,
             last_key_pressed: "—".to_string(),
+            mask_keys: false,
             wallet_modal: None,
             coins: Vec::new(),
             pending_tasks: Vec::new(),
@@ -483,7 +486,11 @@ impl App {
     }
 
     pub fn set_last_key(&mut self, key: String) {
-        self.last_key_pressed = key;
+        self.last_key_pressed = if self.mask_keys { "*".to_string() } else { key };
+    }
+
+    pub fn set_mask_keys(&mut self, mask: bool) {
+        self.mask_keys = mask;
     }
 
     /// Scroll log up by one page (PgUp).
@@ -1712,7 +1719,7 @@ impl App {
                     let prompt = Paragraph::new("Wallet Password:")
                         .style(Style::default().fg(Color::Gray));
                     f.render_widget(prompt, chunks[1]);
-                    let masked = "█".repeat(password.chars().count());
+                    let masked = "*".repeat(password.chars().count());
                     let input = Paragraph::new(masked)
                         .block(Block::default().borders(Borders::ALL))
                         .style(Style::default().fg(Color::White));

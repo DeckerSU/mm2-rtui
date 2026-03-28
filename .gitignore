@@ -17,3 +17,5 @@ debug.log
 target/
 
 start-kdf.sh
+komodo-defi-framework/
+docs/
