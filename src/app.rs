@@ -7,8 +7,36 @@ use ratatui::{
     Frame,
 };
 use crate::coins::Coin;
+use crate::kdf_client;
 use crate::logger::SharedLogger;
 use std::sync::{Arc, Mutex};
+
+/// Which screen is currently displayed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActiveScreen {
+    Main,
+    Swaps,
+}
+
+/// Which field is focused on the Swaps coin selector.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SwapsCoinFocus {
+    Base,
+    Rel,
+}
+
+/// Cached orderbook data.
+#[derive(Debug, Clone)]
+pub struct OrderbookData {
+    pub asks: Vec<kdf_client::OrderbookEntry>,
+    pub bids: Vec<kdf_client::OrderbookEntry>,
+    pub base: String,
+    pub rel: String,
+    pub num_asks: u32,
+    pub num_bids: u32,
+    pub total_asks_base_vol: String,
+    pub total_bids_base_vol: String,
+}
 
 /// State of the wallet selection modal: either choosing a wallet or entering its password.
 #[derive(Debug, Clone)]
@@ -157,6 +185,20 @@ pub struct App {
     withdraw_modal: Option<WithdrawModalState>,
     /// Coin activation selection modal.
     coin_select_modal: Option<CoinSelectModal>,
+    /// Currently active screen.
+    active_screen: ActiveScreen,
+    /// Swaps screen: which coin selector is focused.
+    swaps_focus: SwapsCoinFocus,
+    /// Swaps screen: index of base coin in activated coins list.
+    swaps_base_index: usize,
+    /// Swaps screen: index of rel coin in activated coins list.
+    swaps_rel_index: usize,
+    /// Cached orderbook data.
+    orderbook: Option<OrderbookData>,
+    /// Orderbook loading state.
+    orderbook_loading: bool,
+    /// Orderbook error message.
+    orderbook_error: Option<String>,
 }
 
 impl App {
@@ -181,6 +223,13 @@ impl App {
             tx_history_error: None,
             withdraw_modal: None,
             coin_select_modal: None,
+            active_screen: ActiveScreen::Main,
+            swaps_focus: SwapsCoinFocus::Base,
+            swaps_base_index: 0,
+            swaps_rel_index: 1,
+            orderbook: None,
+            orderbook_loading: false,
+            orderbook_error: None,
         }
     }
 
@@ -631,6 +680,337 @@ impl App {
         self.coin_select_modal = None;
     }
 
+    // --- Screen toggle ---
+
+    pub fn active_screen(&self) -> ActiveScreen {
+        self.active_screen
+    }
+
+    pub fn toggle_screen(&mut self) {
+        self.active_screen = match self.active_screen {
+            ActiveScreen::Main => ActiveScreen::Swaps,
+            ActiveScreen::Swaps => ActiveScreen::Main,
+        };
+    }
+
+    // --- Swaps screen methods ---
+
+    pub fn swaps_focus(&self) -> SwapsCoinFocus {
+        self.swaps_focus
+    }
+
+    pub fn swaps_toggle_focus(&mut self) {
+        self.swaps_focus = match self.swaps_focus {
+            SwapsCoinFocus::Base => SwapsCoinFocus::Rel,
+            SwapsCoinFocus::Rel => SwapsCoinFocus::Base,
+        };
+    }
+
+    /// Returns tickers of activated coins.
+    pub fn activated_coin_tickers(&self) -> Vec<String> {
+        self.coins
+            .iter()
+            .filter(|c| c.activated)
+            .map(|c| c.ticker.clone())
+            .collect()
+    }
+
+    pub fn swaps_select_up(&mut self) {
+        let activated = self.activated_coin_tickers();
+        if activated.is_empty() {
+            return;
+        }
+        match self.swaps_focus {
+            SwapsCoinFocus::Base => {
+                if self.swaps_base_index > 0 {
+                    self.swaps_base_index -= 1;
+                } else {
+                    self.swaps_base_index = activated.len() - 1;
+                }
+            }
+            SwapsCoinFocus::Rel => {
+                if self.swaps_rel_index > 0 {
+                    self.swaps_rel_index -= 1;
+                } else {
+                    self.swaps_rel_index = activated.len() - 1;
+                }
+            }
+        }
+    }
+
+    pub fn swaps_select_down(&mut self) {
+        let activated = self.activated_coin_tickers();
+        if activated.is_empty() {
+            return;
+        }
+        match self.swaps_focus {
+            SwapsCoinFocus::Base => {
+                self.swaps_base_index = (self.swaps_base_index + 1) % activated.len();
+            }
+            SwapsCoinFocus::Rel => {
+                self.swaps_rel_index = (self.swaps_rel_index + 1) % activated.len();
+            }
+        }
+    }
+
+    /// Returns (base_ticker, rel_ticker) if both are valid and different.
+    pub fn swaps_selected_pair(&self) -> Option<(String, String)> {
+        let activated = self.activated_coin_tickers();
+        if activated.len() < 2 {
+            return None;
+        }
+        let base_idx = self.swaps_base_index % activated.len();
+        let rel_idx = self.swaps_rel_index % activated.len();
+        let base = &activated[base_idx];
+        let rel = &activated[rel_idx];
+        if base == rel {
+            return None;
+        }
+        Some((base.clone(), rel.clone()))
+    }
+
+    pub fn swaps_base_ticker(&self) -> Option<String> {
+        let activated = self.activated_coin_tickers();
+        if activated.is_empty() {
+            return None;
+        }
+        Some(activated[self.swaps_base_index % activated.len()].clone())
+    }
+
+    pub fn swaps_rel_ticker(&self) -> Option<String> {
+        let activated = self.activated_coin_tickers();
+        if activated.is_empty() {
+            return None;
+        }
+        Some(activated[self.swaps_rel_index % activated.len()].clone())
+    }
+
+    pub fn set_orderbook(&mut self, data: OrderbookData) {
+        self.orderbook = Some(data);
+        self.orderbook_loading = false;
+        self.orderbook_error = None;
+    }
+
+    pub fn set_orderbook_loading(&mut self, loading: bool) {
+        self.orderbook_loading = loading;
+        if loading {
+            self.orderbook_error = None;
+        }
+    }
+
+    pub fn set_orderbook_error(&mut self, error: String) {
+        self.orderbook_error = Some(error);
+        self.orderbook_loading = false;
+    }
+
+    pub fn orderbook(&self) -> Option<&OrderbookData> {
+        self.orderbook.as_ref()
+    }
+
+    /// Format a decimal string to at most `max_decimals` decimal places, trimming trailing zeros.
+    fn fmt_decimal(s: &str, max_decimals: usize) -> String {
+        if let Some(dot_pos) = s.find('.') {
+            let int_part = &s[..dot_pos];
+            let frac_part = &s[dot_pos + 1..];
+            let truncated = if frac_part.len() > max_decimals {
+                &frac_part[..max_decimals]
+            } else {
+                frac_part
+            };
+            let trimmed = truncated.trim_end_matches('0');
+            if trimmed.is_empty() {
+                int_part.to_string()
+            } else {
+                format!("{}.{}", int_part, trimmed)
+            }
+        } else {
+            s.to_string()
+        }
+    }
+
+    fn render_swaps_screen(&self, f: &mut Frame, area: Rect) {
+        let swaps_chunks = Layout::default()
+            .direction(ratatui::layout::Direction::Vertical)
+            .constraints([
+                Constraint::Length(3),    // coin selector bar
+                Constraint::Percentage(60), // orderbook
+                Constraint::Min(0),      // my orders placeholder
+            ])
+            .split(area);
+
+        // --- Coin selector bar ---
+        let selector_chunks = Layout::default()
+            .direction(ratatui::layout::Direction::Horizontal)
+            .constraints([
+                Constraint::Percentage(50),
+                Constraint::Percentage(50),
+            ])
+            .split(swaps_chunks[0]);
+
+        let base_ticker = self.swaps_base_ticker().unwrap_or_else(|| "—".to_string());
+        let rel_ticker = self.swaps_rel_ticker().unwrap_or_else(|| "—".to_string());
+
+        let base_style = if self.swaps_focus == SwapsCoinFocus::Base {
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::Gray)
+        };
+        let rel_style = if self.swaps_focus == SwapsCoinFocus::Rel {
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::Gray)
+        };
+
+        let base_para = Paragraph::new(format!(" Base: {} ", base_ticker))
+            .block(Block::default().borders(Borders::ALL).title(" Base (↑/↓) "))
+            .style(base_style);
+        f.render_widget(base_para, selector_chunks[0]);
+
+        let rel_para = Paragraph::new(format!(" Rel: {} ", rel_ticker))
+            .block(Block::default().borders(Borders::ALL).title(" Rel (↑/↓) "))
+            .style(rel_style);
+        f.render_widget(rel_para, selector_chunks[1]);
+
+        // --- Orderbook ---
+        let ob_block = Block::default()
+            .borders(Borders::ALL)
+            .title(format!(
+                " Orderbook: {}/{} (←/→ switch, Enter refresh) ",
+                base_ticker, rel_ticker
+            ));
+        let ob_inner = ob_block.inner(swaps_chunks[1]);
+        f.render_widget(ob_block, swaps_chunks[1]);
+
+        if self.orderbook_loading {
+            let loading = Paragraph::new("Loading orderbook...")
+                .style(Style::default().fg(Color::Yellow));
+            f.render_widget(loading, ob_inner);
+        } else if let Some(ref error) = self.orderbook_error {
+            let err_para = Paragraph::new(format!("Error: {}", error))
+                .style(Style::default().fg(Color::Red));
+            f.render_widget(err_para, ob_inner);
+        } else if let Some(ref ob) = self.orderbook {
+            // Split orderbook area into asks (top) and bids (bottom) with a spread line
+            let ob_chunks = Layout::default()
+                .direction(ratatui::layout::Direction::Vertical)
+                .constraints([
+                    Constraint::Length(1),     // header
+                    Constraint::Percentage(50), // asks
+                    Constraint::Length(1),      // spread separator
+                    Constraint::Min(0),        // bids
+                ])
+                .split(ob_inner);
+
+            // Header
+            let header = Line::from(vec![
+                Span::styled(
+                    format!(" {:>12}  {:>14}  {:>14} ",
+                        format!("Price({})", ob.rel),
+                        format!("Amount({})", ob.base),
+                        format!("Total({})", ob.rel),
+                    ),
+                    Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD),
+                ),
+            ]);
+            f.render_widget(Paragraph::new(header), ob_chunks[0]);
+
+            // Asks (sellers) — sorted ascending by price, displayed reversed so lowest ask is near spread
+            let mut asks_sorted = ob.asks.clone();
+            asks_sorted.sort_by(|a, b| {
+                let pa: f64 = a.price.decimal.parse().unwrap_or(0.0);
+                let pb: f64 = b.price.decimal.parse().unwrap_or(0.0);
+                pa.partial_cmp(&pb).unwrap_or(std::cmp::Ordering::Equal)
+            });
+            // Show asks reversed (lowest near the spread line)
+            asks_sorted.reverse();
+
+            let ask_height = ob_chunks[1].height as usize;
+            // Take only as many as fit, from the bottom of the sorted list (lowest prices)
+            let visible_asks: Vec<_> = if asks_sorted.len() > ask_height {
+                asks_sorted[asks_sorted.len() - ask_height..].to_vec()
+            } else {
+                asks_sorted
+            };
+
+            let mut ask_lines: Vec<Line> = Vec::new();
+            // Pad with empty lines at top if fewer asks than available height
+            for _ in 0..(ask_height.saturating_sub(visible_asks.len())) {
+                ask_lines.push(Line::from(""));
+            }
+            for entry in &visible_asks {
+                let price = Self::fmt_decimal(&entry.price.decimal, 8);
+                let amount = Self::fmt_decimal(&entry.base_max_volume.decimal, 8);
+                let total = Self::fmt_decimal(&entry.rel_max_volume.decimal, 8);
+                ask_lines.push(Line::from(vec![
+                    Span::styled(
+                        format!(" {:>12}  {:>14}  {:>14} ", price, amount, total),
+                        Style::default().fg(Color::Red),
+                    ),
+                ]));
+            }
+            f.render_widget(Paragraph::new(ask_lines), ob_chunks[1]);
+
+            // Spread separator
+            let best_ask: Option<f64> = ob.asks.iter()
+                .filter_map(|e| e.price.decimal.parse::<f64>().ok())
+                .reduce(f64::min);
+            let best_bid: Option<f64> = ob.bids.iter()
+                .filter_map(|e| e.price.decimal.parse::<f64>().ok())
+                .reduce(f64::max);
+            let spread_text = match (best_ask, best_bid) {
+                (Some(a), Some(b)) => format!(
+                    " ── Spread: {} ──",
+                    Self::fmt_decimal(&format!("{:.8}", a - b), 8)
+                ),
+                _ => " ── Spread: — ──".to_string(),
+            };
+            let spread_line = Paragraph::new(spread_text)
+                .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
+                .alignment(Alignment::Center);
+            f.render_widget(spread_line, ob_chunks[2]);
+
+            // Bids (buyers) — sorted descending by price (highest bid at top)
+            let mut bids_sorted = ob.bids.clone();
+            bids_sorted.sort_by(|a, b| {
+                let pa: f64 = a.price.decimal.parse().unwrap_or(0.0);
+                let pb: f64 = b.price.decimal.parse().unwrap_or(0.0);
+                pb.partial_cmp(&pa).unwrap_or(std::cmp::Ordering::Equal)
+            });
+
+            let bid_height = ob_chunks[3].height as usize;
+            let visible_bids: Vec<_> = bids_sorted.into_iter().take(bid_height).collect();
+
+            let mut bid_lines: Vec<Line> = Vec::new();
+            for entry in &visible_bids {
+                let price = Self::fmt_decimal(&entry.price.decimal, 8);
+                let amount = Self::fmt_decimal(&entry.base_max_volume.decimal, 8);
+                let total = Self::fmt_decimal(&entry.rel_max_volume.decimal, 8);
+                bid_lines.push(Line::from(vec![
+                    Span::styled(
+                        format!(" {:>12}  {:>14}  {:>14} ", price, amount, total),
+                        Style::default().fg(Color::Green),
+                    ),
+                ]));
+            }
+            f.render_widget(Paragraph::new(bid_lines), ob_chunks[3]);
+        } else {
+            // No orderbook loaded yet
+            let hint = Paragraph::new("Select base/rel coins and press Enter to load orderbook")
+                .style(Style::default().fg(Color::DarkGray));
+            f.render_widget(hint, ob_inner);
+        }
+
+        // --- My Orders placeholder ---
+        let orders_block = Block::default()
+            .borders(Borders::ALL)
+            .title(" My Orders ");
+        let orders_inner = orders_block.inner(swaps_chunks[2]);
+        f.render_widget(orders_block, swaps_chunks[2]);
+        let placeholder = Paragraph::new("Coming soon...")
+            .style(Style::default().fg(Color::DarkGray));
+        f.render_widget(placeholder, orders_inner);
+    }
+
     pub fn render(&self, f: &mut Frame) {
         // Split into: main area, log area, status bar
         let chunks = Layout::default()
@@ -640,18 +1020,34 @@ impl App {
                 Constraint::Length(3),
             ])
             .split(f.size());
-        
-        // Main area: left = coins + balances (ticker left, balance right), right = Details + TX History
+
+        match self.active_screen {
+            ActiveScreen::Main => self.render_main_screen(f, chunks[0]),
+            ActiveScreen::Swaps => self.render_swaps_screen(f, chunks[0]),
+        }
+        // Log area
+        self.render_log(f, chunks[1]);
+
+        // Status bar
+        self.render_status_bar(f, chunks[2]);
+
+        // Modal overlays
+        self.render_modals(f);
+    }
+
+    fn render_main_screen(&self, f: &mut Frame, area: Rect) {
+        // Main area: left = coins + balances, right = Details + TX History
         let main_chunks = Layout::default()
             .direction(ratatui::layout::Direction::Horizontal)
             .constraints([Constraint::Length(28), Constraint::Min(0)])
-            .split(chunks[0]);
-        
+            .split(area);
+
         // Split right panel into Details (top) and Transaction History (bottom)
         let right_chunks = Layout::default()
             .direction(ratatui::layout::Direction::Vertical)
             .constraints([Constraint::Length(10), Constraint::Min(0)])
             .split(main_chunks[1]);
+
         let coins_block = Block::default()
             .borders(Borders::ALL)
             .title(" Coins (↑/↓ Enter, + activate) ");
@@ -867,8 +1263,9 @@ impl App {
         let tx_para = Paragraph::new(tx_content)
             .style(Style::default().fg(Color::White));
         f.render_widget(tx_para, tx_area);
-        
-        // Log area
+    }
+
+    fn render_log(&self, f: &mut Frame, area: Rect) {
         if let Ok(logger) = self.logger.read() {
             let entries = logger.get_entries();
             let current_count = entries.len();
@@ -912,13 +1309,19 @@ impl App {
                         .title("Log"),
                 );
             
-            f.render_stateful_widget(log_list, chunks[1], &mut list_state);
-            
+            f.render_stateful_widget(log_list, area, &mut list_state);
+
             // Update state
             *self.log_list_state.lock().unwrap() = list_state;
         }
-        
-        // Status bar: version | last key | time
+    }
+
+    fn render_status_bar(&self, f: &mut Frame, area: Rect) {
+        let screen_label = match self.active_screen {
+            ActiveScreen::Main => "[Tab] Main | Swaps",
+            ActiveScreen::Swaps => "Main | [Tab] Swaps",
+        };
+
         let status_chunks = Layout::default()
             .direction(ratatui::layout::Direction::Horizontal)
             .constraints([
@@ -926,9 +1329,9 @@ impl App {
                 Constraint::Percentage(20),
                 Constraint::Percentage(40),
             ])
-            .split(chunks[2]);
-        
-        let version_text = format!("KDF: {}", self.kdf_version);
+            .split(area);
+
+        let version_text = format!("{} | KDF: {}", screen_label, self.kdf_version);
         let version_para = Paragraph::new(version_text)
             .block(Block::default().borders(Borders::ALL))
             .style(Style::default().fg(Color::Cyan))
@@ -952,7 +1355,9 @@ impl App {
             .style(Style::default().fg(Color::Yellow))
             .alignment(Alignment::Right);
         f.render_widget(time_para, status_chunks[2]);
+    }
 
+    fn render_modals(&self, f: &mut Frame) {
         // Wallet selection modal (centered overlay)
         if let Some(state) = &self.wallet_modal {
             let area = f.size();

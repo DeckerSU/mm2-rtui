@@ -441,6 +441,90 @@ pub async fn withdraw(userpass: &str, coin: &str, to: &str, amount: &str) -> Res
     Ok(body)
 }
 
+/// orderbook request (legacy API)
+#[derive(Debug, Serialize)]
+struct OrderbookRequest {
+    method: String,
+    base: String,
+    rel: String,
+    userpass: String,
+}
+
+/// Price field in orderbook entry (we only need the decimal string).
+#[derive(Debug, Deserialize, Clone)]
+pub struct OrderbookDecimal {
+    pub decimal: String,
+}
+
+/// A single order entry (ask or bid) in the orderbook response.
+#[derive(Debug, Deserialize, Clone)]
+pub struct OrderbookEntry {
+    pub coin: String,
+    pub price: OrderbookDecimal,
+    pub base_max_volume: OrderbookDecimal,
+    pub base_min_volume: OrderbookDecimal,
+    pub rel_max_volume: OrderbookDecimal,
+    pub rel_min_volume: OrderbookDecimal,
+    pub uuid: String,
+    pub is_mine: bool,
+    pub pubkey: String,
+}
+
+/// Orderbook response result.
+#[derive(Debug, Deserialize, Clone)]
+pub struct OrderbookResult {
+    pub asks: Vec<OrderbookEntry>,
+    pub bids: Vec<OrderbookEntry>,
+    pub base: String,
+    pub rel: String,
+    pub num_asks: u32,
+    pub num_bids: u32,
+    pub timestamp: u64,
+    pub total_asks_base_vol: OrderbookDecimal,
+    pub total_asks_rel_vol: OrderbookDecimal,
+    pub total_bids_base_vol: OrderbookDecimal,
+    pub total_bids_rel_vol: OrderbookDecimal,
+}
+
+/// Orderbook response (mmrpc 2.0 format).
+#[derive(Debug, Deserialize)]
+pub struct OrderbookResponse {
+    pub result: OrderbookResult,
+}
+
+pub async fn orderbook(userpass: &str, base: &str, rel: &str) -> Result<OrderbookResponse> {
+    let client = reqwest::Client::new();
+    let request = serde_json::json!({
+        "method": "orderbook",
+        "mmrpc": "2.0",
+        "params": {
+            "base": base,
+            "rel": rel
+        },
+        "userpass": userpass
+    });
+    let response = client
+        .post(KDF_RPC_URL)
+        .json(&request)
+        .send()
+        .await
+        .context("Failed to send orderbook request to KDF")?;
+    let text = response
+        .text()
+        .await
+        .context("Failed to read orderbook response body")?;
+    log_rpc_response("orderbook", &text);
+    // Check for error response
+    if let Ok(err) = serde_json::from_str::<Value>(&text) {
+        if let Some(error) = err.get("error") {
+            anyhow::bail!("{}", error);
+        }
+    }
+    let body: OrderbookResponse =
+        serde_json::from_str(&text).context("Failed to parse orderbook response from KDF")?;
+    Ok(body)
+}
+
 /// send_raw_transaction request (legacy API)
 #[derive(Debug, Serialize)]
 struct SendRawTransactionRequest {

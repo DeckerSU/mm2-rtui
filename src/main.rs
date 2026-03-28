@@ -744,8 +744,85 @@ async fn run_app<B: Backend>(
                                     }
                                     _ => {}
                                 }
+                            } else if app.active_screen() == app::ActiveScreen::Swaps {
+                                // --- Swaps screen key handling ---
+                                match key.code {
+                                    KeyCode::Tab => {
+                                        app.toggle_screen();
+                                    }
+                                    KeyCode::Left | KeyCode::Right => {
+                                        app.swaps_toggle_focus();
+                                    }
+                                    KeyCode::Up => {
+                                        app.swaps_select_up();
+                                    }
+                                    KeyCode::Down => {
+                                        app.swaps_select_down();
+                                    }
+                                    KeyCode::Enter => {
+                                        // Fetch orderbook for selected pair
+                                        if let Some((base, rel)) = app.swaps_selected_pair() {
+                                            app.set_orderbook_loading(true);
+                                            drop(app);
+                                            if let Ok(mut log) = logger.write() {
+                                                log.info(format!("Fetching orderbook {}/{}...", base, rel));
+                                            }
+                                            match kdf_client::orderbook(&rpc_password, &base, &rel).await {
+                                                Ok(res) => {
+                                                    if let Ok(mut a) = app_state.write() {
+                                                        a.set_orderbook(app::OrderbookData {
+                                                            asks: res.result.asks,
+                                                            bids: res.result.bids,
+                                                            base: res.result.base,
+                                                            rel: res.result.rel,
+                                                            num_asks: res.result.num_asks,
+                                                            num_bids: res.result.num_bids,
+                                                            total_asks_base_vol: res.result.total_asks_base_vol.decimal,
+                                                            total_bids_base_vol: res.result.total_bids_base_vol.decimal,
+                                                        });
+                                                    }
+                                                    if let Ok(mut log) = logger.write() {
+                                                        log.info(format!(
+                                                            "Orderbook {}/{}: {} asks, {} bids",
+                                                            base, rel, res.result.num_asks, res.result.num_bids
+                                                        ));
+                                                    }
+                                                }
+                                                Err(e) => {
+                                                    if let Ok(mut a) = app_state.write() {
+                                                        a.set_orderbook_error(format!("{}", e));
+                                                    }
+                                                    if let Ok(mut log) = logger.write() {
+                                                        log.error(format!("Orderbook error: {}", e));
+                                                    }
+                                                }
+                                            }
+                                        } else {
+                                            drop(app);
+                                            if let Ok(mut log) = logger.write() {
+                                                log.warn("Select different base and rel coins (need at least 2 activated)".to_string());
+                                            }
+                                        }
+                                    }
+                                    KeyCode::Char('q') | KeyCode::Char('Q') | KeyCode::Esc => {
+                                        // Go back to Main screen instead of quitting
+                                        app.toggle_screen();
+                                    }
+                                    KeyCode::PageUp => {
+                                        let entry_count = logger.read().map(|l| l.get_entries().len()).unwrap_or(0);
+                                        app.scroll_log_up(entry_count);
+                                    }
+                                    KeyCode::PageDown => {
+                                        let entry_count = logger.read().map(|l| l.get_entries().len()).unwrap_or(0);
+                                        app.scroll_log_down(entry_count);
+                                    }
+                                    _ => {}
+                                }
                             } else {
                                 match key.code {
+                                    KeyCode::Tab => {
+                                        app.toggle_screen();
+                                    }
                                     KeyCode::Char('q') | KeyCode::Char('Q') => {
                             // Release write lock before shutdown so terminal.draw can read app_state
                             drop(app);
