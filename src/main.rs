@@ -951,8 +951,17 @@ async fn run_app<B: Backend>(
                                         if let Some((base, rel)) = app.swaps_selected_pair() {
                                             app.set_orderbook_loading(true);
                                             drop(app);
+                                            if let Ok(mut log) = logger.write() {
+                                                log.info(format!("Fetching orderbook {}/{}...", base, rel));
+                                            }
                                             match kdf_client::orderbook(&rpc_password, &base, &rel).await {
                                                 Ok(res) => {
+                                                    if let Ok(mut log) = logger.write() {
+                                                        log.info(format!(
+                                                            "Orderbook {}/{}: {} asks, {} bids",
+                                                            base, rel, res.result.num_asks, res.result.num_bids
+                                                        ));
+                                                    }
                                                     if let Ok(mut a) = app_state.write() {
                                                         a.set_orderbook(app::OrderbookData {
                                                             asks: res.result.asks,
@@ -967,6 +976,9 @@ async fn run_app<B: Backend>(
                                                     }
                                                 }
                                                 Err(e) => {
+                                                    if let Ok(mut log) = logger.write() {
+                                                        log.error(format!("Orderbook error: {}", e));
+                                                    }
                                                     if let Ok(mut a) = app_state.write() {
                                                         a.set_orderbook_error(format!("{}", e));
                                                     }
