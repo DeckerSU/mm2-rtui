@@ -945,6 +945,35 @@ async fn run_app<B: Backend>(
                                             }
                                         }
                                     }
+                                    KeyCode::Char('u') | KeyCode::Char('U') => {
+                                        app.swaps_flip_pair();
+                                        // Refresh orderbook with flipped pair
+                                        if let Some((base, rel)) = app.swaps_selected_pair() {
+                                            app.set_orderbook_loading(true);
+                                            drop(app);
+                                            match kdf_client::orderbook(&rpc_password, &base, &rel).await {
+                                                Ok(res) => {
+                                                    if let Ok(mut a) = app_state.write() {
+                                                        a.set_orderbook(app::OrderbookData {
+                                                            asks: res.result.asks,
+                                                            bids: res.result.bids,
+                                                            base: res.result.base,
+                                                            rel: res.result.rel,
+                                                            num_asks: res.result.num_asks,
+                                                            num_bids: res.result.num_bids,
+                                                            total_asks_base_vol: res.result.total_asks_base_vol.decimal,
+                                                            total_bids_base_vol: res.result.total_bids_base_vol.decimal,
+                                                        });
+                                                    }
+                                                }
+                                                Err(e) => {
+                                                    if let Ok(mut a) = app_state.write() {
+                                                        a.set_orderbook_error(format!("{}", e));
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
                                     KeyCode::Char('m') | KeyCode::Char('M') => {
                                         app.open_maker_order_modal();
                                     }

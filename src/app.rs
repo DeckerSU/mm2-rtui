@@ -820,6 +820,11 @@ impl App {
         }
     }
 
+    /// Swap base and rel coin indices.
+    pub fn swaps_flip_pair(&mut self) {
+        std::mem::swap(&mut self.swaps_base_index, &mut self.swaps_rel_index);
+    }
+
     /// Returns (base_ticker, rel_ticker) if both are valid and different.
     pub fn swaps_selected_pair(&self) -> Option<(String, String)> {
         let activated = self.activated_coin_tickers();
@@ -1087,7 +1092,7 @@ impl App {
         let ob_block = Block::default()
             .borders(Borders::ALL)
             .title(format!(
-                " Orderbook: {}/{} (←/→ switch, Enter refresh) ",
+                " Orderbook: {}/{} (←/→ switch, Enter refresh, U flip) ",
                 base_ticker, rel_ticker
             ));
         let ob_inner = ob_block.inner(swaps_chunks[1]);
