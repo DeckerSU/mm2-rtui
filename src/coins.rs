@@ -81,6 +81,10 @@ pub struct Coin {
     pub wallet_type: Option<String>,
     /// Address from status (Iguana wallet).
     pub address: Option<String>,
+    /// Required confirmations from coins_config.json.
+    pub required_confirmations: u32,
+    /// Whether notarization is required from coins_config.json.
+    pub requires_notarization: bool,
 }
 
 const SATOSHI_PER_COIN: i64 = 100_000_000;
@@ -197,6 +201,8 @@ pub fn load_utxo_coins_from_config(
             current_block: None,
             wallet_type: None,
             address: None,
+            required_confirmations: raw.required_confirmations.unwrap_or(2),
+            requires_notarization: raw.requires_notarization.unwrap_or(false),
         };
         out.push((coin, params));
     }

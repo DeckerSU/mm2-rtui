@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::HashMap;
 use std::io::Write;
 
 const KDF_RPC_URL: &str = "http://127.0.0.1:7783";
@@ -522,6 +523,162 @@ pub async fn orderbook(userpass: &str, base: &str, rel: &str) -> Result<Orderboo
     }
     let body: OrderbookResponse =
         serde_json::from_str(&text).context("Failed to parse orderbook response from KDF")?;
+    Ok(body)
+}
+
+// --- setprice (maker order) ---
+
+/// Confirmation settings in order responses.
+#[derive(Debug, Deserialize, Clone)]
+pub struct ConfSettings {
+    pub base_confs: u32,
+    pub base_nota: bool,
+    pub rel_confs: u32,
+    pub rel_nota: bool,
+}
+
+/// setprice response result.
+#[derive(Debug, Deserialize, Clone)]
+pub struct SetPriceResult {
+    pub base: String,
+    pub rel: String,
+    pub price: String,
+    pub max_base_vol: String,
+    pub min_base_vol: String,
+    pub created_at: u64,
+    pub uuid: String,
+    pub conf_settings: Option<ConfSettings>,
+}
+
+/// setprice response.
+#[derive(Debug, Deserialize)]
+pub struct SetPriceResponse {
+    pub result: SetPriceResult,
+}
+
+pub async fn setprice(
+    userpass: &str,
+    base: &str,
+    rel: &str,
+    price: &str,
+    volume: &str,
+    base_confs: u32,
+    base_nota: bool,
+    rel_confs: u32,
+    rel_nota: bool,
+) -> Result<SetPriceResponse> {
+    let client = reqwest::Client::new();
+    let request = serde_json::json!({
+        "method": "setprice",
+        "userpass": userpass,
+        "base": base,
+        "rel": rel,
+        "price": price,
+        "volume": volume,
+        "base_confs": base_confs,
+        "base_nota": base_nota,
+        "rel_confs": rel_confs,
+        "rel_nota": rel_nota,
+    });
+    let response = client
+        .post(KDF_RPC_URL)
+        .json(&request)
+        .send()
+        .await
+        .context("Failed to send setprice request to KDF")?;
+    let text = response
+        .text()
+        .await
+        .context("Failed to read setprice response body")?;
+    log_rpc_response("setprice", &text);
+    if let Ok(err) = serde_json::from_str::<Value>(&text) {
+        if let Some(error) = err.get("error") {
+            anyhow::bail!("{}", error);
+        }
+    }
+    let body: SetPriceResponse =
+        serde_json::from_str(&text).context("Failed to parse setprice response from KDF")?;
+    Ok(body)
+}
+
+// --- my_orders ---
+
+/// A single maker order from my_orders response.
+#[derive(Debug, Deserialize, Clone)]
+pub struct MyMakerOrder {
+    pub base: String,
+    pub rel: String,
+    pub price: String,
+    pub max_base_vol: String,
+    pub min_base_vol: String,
+    pub created_at: u64,
+    pub uuid: String,
+    pub conf_settings: Option<ConfSettings>,
+    #[serde(default)]
+    pub cancellable: bool,
+    #[serde(default)]
+    pub available_amount: Option<String>,
+}
+
+/// A single taker order from my_orders response.
+#[derive(Debug, Deserialize, Clone)]
+pub struct MyTakerOrder {
+    pub created_at: u64,
+    pub request: TakerOrderRequest,
+    #[serde(default)]
+    pub cancellable: bool,
+    #[serde(default)]
+    pub order_type: Option<String>,
+}
+
+/// Taker order request details.
+#[derive(Debug, Deserialize, Clone)]
+pub struct TakerOrderRequest {
+    pub base: String,
+    pub rel: String,
+    pub base_amount: String,
+    pub rel_amount: String,
+    pub action: String,
+    pub uuid: String,
+}
+
+/// my_orders response result.
+#[derive(Debug, Deserialize)]
+pub struct MyOrdersResult {
+    pub maker_orders: HashMap<String, MyMakerOrder>,
+    pub taker_orders: HashMap<String, MyTakerOrder>,
+}
+
+/// my_orders response.
+#[derive(Debug, Deserialize)]
+pub struct MyOrdersResponse {
+    pub result: MyOrdersResult,
+}
+
+pub async fn my_orders(userpass: &str) -> Result<MyOrdersResponse> {
+    let client = reqwest::Client::new();
+    let request = serde_json::json!({
+        "method": "my_orders",
+        "userpass": userpass,
+    });
+    let response = client
+        .post(KDF_RPC_URL)
+        .json(&request)
+        .send()
+        .await
+        .context("Failed to send my_orders request to KDF")?;
+    let text = response
+        .text()
+        .await
+        .context("Failed to read my_orders response body")?;
+    log_rpc_response("my_orders", &text);
+    if let Ok(err) = serde_json::from_str::<Value>(&text) {
+        if let Some(error) = err.get("error") {
+            anyhow::bail!("{}", error);
+        }
+    }
+    let body: MyOrdersResponse =
+        serde_json::from_str(&text).context("Failed to parse my_orders response from KDF")?;
     Ok(body)
 }
 

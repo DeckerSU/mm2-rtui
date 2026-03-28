@@ -38,6 +38,67 @@ pub struct OrderbookData {
     pub total_bids_base_vol: String,
 }
 
+/// State of the maker order creation modal.
+#[derive(Debug, Clone)]
+pub enum MakerOrderModal {
+    /// Entering volume (amount of base coin to sell).
+    EnteringVolume {
+        base: String,
+        rel: String,
+        volume: String,
+        /// Max spendable for base coin (display hint).
+        max_base: String,
+        /// Confirmation settings (read-only display).
+        base_confs: u32,
+        base_nota: bool,
+        rel_confs: u32,
+        rel_nota: bool,
+    },
+    /// Entering price (amount of rel per 1 base).
+    EnteringPrice {
+        base: String,
+        rel: String,
+        volume: String,
+        price: String,
+        max_base: String,
+        base_confs: u32,
+        base_nota: bool,
+        rel_confs: u32,
+        rel_nota: bool,
+    },
+    /// Confirming before sending.
+    Confirming {
+        base: String,
+        rel: String,
+        volume: String,
+        price: String,
+        base_confs: u32,
+        base_nota: bool,
+        rel_confs: u32,
+        rel_nota: bool,
+    },
+    /// Waiting for RPC response.
+    Sending,
+    /// Show result (success or error).
+    Result {
+        success: bool,
+        message: String,
+    },
+}
+
+/// A user order entry for display in My Orders panel.
+#[derive(Debug, Clone)]
+pub struct MyOrderEntry {
+    pub uuid: String,
+    pub order_type: String,  // "Maker" or "Taker"
+    pub base: String,
+    pub rel: String,
+    pub price: String,
+    pub volume: String,
+    pub cancellable: bool,
+    pub status: String,      // placeholder for now
+}
+
 /// State of the wallet selection modal: either choosing a wallet or entering its password.
 #[derive(Debug, Clone)]
 pub enum WalletModalState {
@@ -199,6 +260,10 @@ pub struct App {
     orderbook_loading: bool,
     /// Orderbook error message.
     orderbook_error: Option<String>,
+    /// Maker order creation modal.
+    maker_order_modal: Option<MakerOrderModal>,
+    /// My orders list (maker + taker).
+    my_orders: Vec<MyOrderEntry>,
 }
 
 impl App {
@@ -230,6 +295,8 @@ impl App {
             orderbook: None,
             orderbook_loading: false,
             orderbook_error: None,
+            maker_order_modal: None,
+            my_orders: Vec::new(),
         }
     }
 
@@ -807,6 +874,151 @@ impl App {
         self.orderbook.as_ref()
     }
 
+    // --- Maker order modal ---
+
+    pub fn maker_order_modal(&self) -> Option<&MakerOrderModal> {
+        self.maker_order_modal.as_ref()
+    }
+
+    /// Open maker order modal for the currently selected base/rel pair.
+    pub fn open_maker_order_modal(&mut self) {
+        let base_ticker = match self.swaps_base_ticker() {
+            Some(t) => t,
+            None => return,
+        };
+        let rel_ticker = match self.swaps_rel_ticker() {
+            Some(t) => t,
+            None => return,
+        };
+        if base_ticker == rel_ticker {
+            return;
+        }
+        // Get max spendable for base coin
+        let max_base = self.coins.iter()
+            .find(|c| c.ticker == base_ticker)
+            .map(|c| c.spendable_display())
+            .unwrap_or_else(|| "0".to_string());
+        // Get confirmation settings
+        let (base_confs, base_nota) = self.coins.iter()
+            .find(|c| c.ticker == base_ticker)
+            .map(|c| (c.required_confirmations, c.requires_notarization))
+            .unwrap_or((2, false));
+        let (rel_confs, rel_nota) = self.coins.iter()
+            .find(|c| c.ticker == rel_ticker)
+            .map(|c| (c.required_confirmations, c.requires_notarization))
+            .unwrap_or((2, false));
+
+        self.maker_order_modal = Some(MakerOrderModal::EnteringVolume {
+            base: base_ticker,
+            rel: rel_ticker,
+            volume: String::new(),
+            max_base,
+            base_confs,
+            base_nota,
+            rel_confs,
+            rel_nota,
+        });
+    }
+
+    pub fn maker_order_modal_push_char(&mut self, c: char) {
+        match &mut self.maker_order_modal {
+            Some(MakerOrderModal::EnteringVolume { volume, .. }) => {
+                if c.is_ascii_digit() || (c == '.' && !volume.contains('.')) {
+                    volume.push(c);
+                }
+            }
+            Some(MakerOrderModal::EnteringPrice { price, .. }) => {
+                if c.is_ascii_digit() || (c == '.' && !price.contains('.')) {
+                    price.push(c);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    pub fn maker_order_modal_backspace(&mut self) {
+        match &mut self.maker_order_modal {
+            Some(MakerOrderModal::EnteringVolume { volume, .. }) => { volume.pop(); }
+            Some(MakerOrderModal::EnteringPrice { price, .. }) => { price.pop(); }
+            _ => {}
+        }
+    }
+
+    /// Confirm volume → move to price entry. Returns true if transitioned.
+    pub fn maker_order_modal_confirm_volume(&mut self) -> bool {
+        if let Some(MakerOrderModal::EnteringVolume {
+            base, rel, volume, max_base,
+            base_confs, base_nota, rel_confs, rel_nota,
+        }) = self.maker_order_modal.take()
+        {
+            if !volume.is_empty() && volume.parse::<f64>().unwrap_or(0.0) > 0.0 {
+                self.maker_order_modal = Some(MakerOrderModal::EnteringPrice {
+                    base, rel, volume, price: String::new(), max_base,
+                    base_confs, base_nota, rel_confs, rel_nota,
+                });
+                return true;
+            }
+            self.maker_order_modal = Some(MakerOrderModal::EnteringVolume {
+                base, rel, volume, max_base,
+                base_confs, base_nota, rel_confs, rel_nota,
+            });
+        }
+        false
+    }
+
+    /// Confirm price → move to confirmation. Returns true if transitioned.
+    pub fn maker_order_modal_confirm_price(&mut self) -> bool {
+        if let Some(MakerOrderModal::EnteringPrice {
+            base, rel, volume, price, max_base: _,
+            base_confs, base_nota, rel_confs, rel_nota,
+        }) = self.maker_order_modal.take()
+        {
+            if !price.is_empty() && price.parse::<f64>().unwrap_or(0.0) > 0.0 {
+                self.maker_order_modal = Some(MakerOrderModal::Confirming {
+                    base, rel, volume, price,
+                    base_confs, base_nota, rel_confs, rel_nota,
+                });
+                return true;
+            }
+            self.maker_order_modal = Some(MakerOrderModal::EnteringPrice {
+                base, rel, volume, price, max_base: "".to_string(),
+                base_confs, base_nota, rel_confs, rel_nota,
+            });
+        }
+        false
+    }
+
+    /// User confirmed → returns (base, rel, volume, price, base_confs, base_nota, rel_confs, rel_nota).
+    pub fn maker_order_modal_confirm_send(&mut self) -> Option<(String, String, String, String, u32, bool, u32, bool)> {
+        if let Some(MakerOrderModal::Confirming {
+            base, rel, volume, price,
+            base_confs, base_nota, rel_confs, rel_nota,
+        }) = self.maker_order_modal.take()
+        {
+            self.maker_order_modal = Some(MakerOrderModal::Sending);
+            return Some((base, rel, volume, price, base_confs, base_nota, rel_confs, rel_nota));
+        }
+        None
+    }
+
+    pub fn maker_order_modal_set_result(&mut self, success: bool, message: String) {
+        self.maker_order_modal = Some(MakerOrderModal::Result { success, message });
+    }
+
+    pub fn close_maker_order_modal(&mut self) {
+        self.maker_order_modal = None;
+    }
+
+    // --- My orders ---
+
+    pub fn update_my_orders(&mut self, orders: Vec<MyOrderEntry>) {
+        self.my_orders = orders;
+    }
+
+    pub fn my_orders_list(&self) -> &[MyOrderEntry] {
+        &self.my_orders
+    }
+
     /// Format a decimal string to at most `max_decimals` decimal places, trimming trailing zeros.
     fn fmt_decimal(s: &str, max_decimals: usize) -> String {
         if let Some(dot_pos) = s.find('.') {
@@ -1000,15 +1212,54 @@ impl App {
             f.render_widget(hint, ob_inner);
         }
 
-        // --- My Orders placeholder ---
+        // --- My Orders ---
         let orders_block = Block::default()
             .borders(Borders::ALL)
-            .title(" My Orders ");
+            .title(" My Orders (M - new maker order) ");
         let orders_inner = orders_block.inner(swaps_chunks[2]);
         f.render_widget(orders_block, swaps_chunks[2]);
-        let placeholder = Paragraph::new("Coming soon...")
-            .style(Style::default().fg(Color::DarkGray));
-        f.render_widget(placeholder, orders_inner);
+
+        if self.my_orders.is_empty() {
+            let hint = Paragraph::new("No active orders. Press M to create a maker order.")
+                .style(Style::default().fg(Color::DarkGray));
+            f.render_widget(hint, orders_inner);
+        } else {
+            let mut lines: Vec<Line> = Vec::new();
+            // Header
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!(" {:6} {:8} {:>12} {:>12} {:>12}  {:36} ",
+                        "Type", "Pair", "Volume", "Price", "Total", "UUID"
+                    ),
+                    Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD),
+                ),
+            ]));
+            for order in &self.my_orders {
+                let total_f = order.volume.parse::<f64>().unwrap_or(0.0)
+                    * order.price.parse::<f64>().unwrap_or(0.0);
+                let total = Self::fmt_decimal(&format!("{:.8}", total_f), 8);
+                let pair = format!("{}→{}", order.base, order.rel);
+                let vol = Self::fmt_decimal(&order.volume, 8);
+                let price_fmt = Self::fmt_decimal(&order.price, 8);
+                let type_color = if order.order_type == "Maker" { Color::Cyan } else { Color::Magenta };
+                let uuid_short = if order.uuid.len() > 8 {
+                    &order.uuid[..8]
+                } else {
+                    &order.uuid
+                };
+                lines.push(Line::from(vec![
+                    Span::styled(format!(" {:6}", order.order_type), Style::default().fg(type_color)),
+                    Span::raw(format!(" {:8}", pair)),
+                    Span::styled(format!(" {:>12}", vol), Style::default().fg(Color::White)),
+                    Span::styled(format!(" {:>12}", price_fmt), Style::default().fg(Color::Yellow)),
+                    Span::styled(format!(" {:>12}", total), Style::default().fg(Color::Green)),
+                    Span::raw(format!("  {}…", uuid_short)),
+                ]));
+            }
+            let para = Paragraph::new(lines)
+                .style(Style::default().fg(Color::White));
+            f.render_widget(para, orders_inner);
+        }
     }
 
     pub fn render(&self, f: &mut Frame) {
@@ -1762,6 +2013,191 @@ impl App {
                 WithdrawModalState::Result { success, message } => {
                     let color = if *success { Color::Green } else { Color::Red };
                     let title = if *success { " Withdraw Success " } else { " Withdraw Error " };
+                    let block = Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(color))
+                        .title(title);
+                    let inner = block.inner(modal_rect);
+                    f.render_widget(block, modal_rect);
+
+                    let mut lines = vec![Line::from("")];
+                    for part in message.split('\n') {
+                        lines.push(Line::from(vec![
+                            Span::styled(part.to_string(), Style::default().fg(color)),
+                        ]));
+                    }
+                    lines.push(Line::from(""));
+                    lines.push(Line::from(vec![
+                        Span::styled("Press Esc to close", Style::default().fg(Color::DarkGray)),
+                    ]));
+
+                    let para = Paragraph::new(lines)
+                        .style(Style::default().fg(Color::White));
+                    f.render_widget(para, inner);
+                }
+            }
+        }
+
+        // Maker order modal (centered overlay)
+        if let Some(mstate) = &self.maker_order_modal {
+            let area = f.size();
+            let modal_w = 70.min(area.width.saturating_sub(4));
+            let modal_h = 22.min(area.height.saturating_sub(4));
+            let x = area.width.saturating_sub(modal_w) / 2;
+            let y = area.height.saturating_sub(modal_h) / 2;
+            let modal_rect = Rect::new(x, y, modal_w, modal_h);
+
+            f.render_widget(Clear, modal_rect);
+
+            match mstate {
+                MakerOrderModal::EnteringVolume {
+                    base, rel, volume, max_base,
+                    base_confs, base_nota, rel_confs, rel_nota,
+                } => {
+                    let block = Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(Color::Cyan))
+                        .title(format!(" Maker Order: {} → {} — Volume ", base, rel));
+                    let inner = block.inner(modal_rect);
+                    f.render_widget(block, modal_rect);
+
+                    let chunks = Layout::default()
+                        .constraints([
+                            Constraint::Length(3),
+                            Constraint::Length(3),
+                            Constraint::Length(3),
+                            Constraint::Min(0),
+                        ])
+                        .split(inner);
+
+                    let conf_text = format!(
+                        "  {} Confirmations: {} (dPoW: {})  |  {} Confirmations: {} (dPoW: {})",
+                        base, base_confs, base_nota, rel, rel_confs, rel_nota
+                    );
+                    let conf_para = Paragraph::new(conf_text)
+                        .style(Style::default().fg(Color::DarkGray));
+                    f.render_widget(conf_para, chunks[0]);
+
+                    let hint = format!("  Sell {} (max: {})", base, max_base);
+                    let hint_para = Paragraph::new(hint)
+                        .style(Style::default().fg(Color::Yellow));
+                    f.render_widget(hint_para, chunks[1]);
+
+                    let input = Paragraph::new(volume.as_str())
+                        .block(Block::default().borders(Borders::ALL).title(format!(" Volume ({}) ", base)))
+                        .style(Style::default().fg(Color::White));
+                    f.render_widget(input, chunks[2]);
+
+                    let footer = Paragraph::new("  Enter — next  |  Esc — cancel")
+                        .style(Style::default().fg(Color::DarkGray));
+                    f.render_widget(footer, chunks[3]);
+                }
+                MakerOrderModal::EnteringPrice {
+                    base, rel, volume, price, max_base: _,
+                    base_confs, base_nota, rel_confs, rel_nota,
+                } => {
+                    let block = Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(Color::Cyan))
+                        .title(format!(" Maker Order: {} → {} — Price ", base, rel));
+                    let inner = block.inner(modal_rect);
+                    f.render_widget(block, modal_rect);
+
+                    let chunks = Layout::default()
+                        .constraints([
+                            Constraint::Length(3),
+                            Constraint::Length(2),
+                            Constraint::Length(3),
+                            Constraint::Min(0),
+                        ])
+                        .split(inner);
+
+                    let conf_text = format!(
+                        "  {} Confirmations: {} (dPoW: {})  |  {} Confirmations: {} (dPoW: {})",
+                        base, base_confs, base_nota, rel, rel_confs, rel_nota
+                    );
+                    let conf_para = Paragraph::new(conf_text)
+                        .style(Style::default().fg(Color::DarkGray));
+                    f.render_widget(conf_para, chunks[0]);
+
+                    let info = format!("  Volume: {} {}", volume, base);
+                    let info_para = Paragraph::new(info)
+                        .style(Style::default().fg(Color::Cyan));
+                    f.render_widget(info_para, chunks[1]);
+
+                    let input = Paragraph::new(price.as_str())
+                        .block(Block::default().borders(Borders::ALL).title(format!(" Price ({} per 1 {}) ", rel, base)))
+                        .style(Style::default().fg(Color::White));
+                    f.render_widget(input, chunks[2]);
+
+                    let footer = Paragraph::new("  Enter — confirm  |  Esc — cancel")
+                        .style(Style::default().fg(Color::DarkGray));
+                    f.render_widget(footer, chunks[3]);
+                }
+                MakerOrderModal::Confirming {
+                    base, rel, volume, price,
+                    base_confs, base_nota, rel_confs, rel_nota,
+                } => {
+                    let block = Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(Color::Red))
+                        .title(format!(" Confirm Maker Order: {} → {} ", base, rel));
+                    let inner = block.inner(modal_rect);
+                    f.render_widget(block, modal_rect);
+
+                    let vol_f = volume.parse::<f64>().unwrap_or(0.0);
+                    let price_f = price.parse::<f64>().unwrap_or(0.0);
+                    let total = Self::fmt_decimal(&format!("{:.8}", vol_f * price_f), 8);
+
+                    let lines = vec![
+                        Line::from(""),
+                        Line::from(vec![
+                            Span::styled("  Sell:   ", Style::default().fg(Color::DarkGray)),
+                            Span::styled(format!("{} {}", volume, base), Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+                        ]),
+                        Line::from(vec![
+                            Span::styled("  Price:  ", Style::default().fg(Color::DarkGray)),
+                            Span::styled(format!("{} {} per 1 {}", price, rel, base), Style::default().fg(Color::Yellow)),
+                        ]),
+                        Line::from(vec![
+                            Span::styled("  Get:    ", Style::default().fg(Color::DarkGray)),
+                            Span::styled(format!("{} {}", total, rel), Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+                        ]),
+                        Line::from(""),
+                        Line::from(vec![
+                            Span::styled(
+                                format!("  {} Confs: {} (dPoW: {})  |  {} Confs: {} (dPoW: {})",
+                                    base, base_confs, base_nota, rel, rel_confs, rel_nota),
+                                Style::default().fg(Color::DarkGray),
+                            ),
+                        ]),
+                        Line::from(""),
+                        Line::from(vec![
+                            Span::styled(
+                                "  Y — PLACE ORDER  |  Esc — cancel",
+                                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                            ),
+                        ]),
+                    ];
+
+                    let para = Paragraph::new(lines)
+                        .style(Style::default().fg(Color::White));
+                    f.render_widget(para, inner);
+                }
+                MakerOrderModal::Sending => {
+                    let block = Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(Color::Yellow))
+                        .title(" Maker Order ");
+                    let inner = block.inner(modal_rect);
+                    f.render_widget(block, modal_rect);
+                    let para = Paragraph::new("  Placing order...")
+                        .style(Style::default().fg(Color::Yellow));
+                    f.render_widget(para, inner);
+                }
+                MakerOrderModal::Result { success, message } => {
+                    let color = if *success { Color::Green } else { Color::Red };
+                    let title = if *success { " Order Placed " } else { " Order Error " };
                     let block = Block::default()
                         .borders(Borders::ALL)
                         .border_style(Style::default().fg(color))

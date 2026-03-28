@@ -350,6 +350,44 @@ fn key_code_to_display(code: KeyCode) -> String {
     }
 }
 
+/// Build MyOrderEntry list from my_orders RPC response.
+fn build_my_order_entries(result: &kdf_client::MyOrdersResult) -> Vec<app::MyOrderEntry> {
+    let mut entries = Vec::new();
+    for (_, order) in &result.maker_orders {
+        entries.push(app::MyOrderEntry {
+            uuid: order.uuid.clone(),
+            order_type: "Maker".to_string(),
+            base: order.base.clone(),
+            rel: order.rel.clone(),
+            price: order.price.clone(),
+            volume: order.available_amount.clone().unwrap_or_else(|| order.max_base_vol.clone()),
+            cancellable: order.cancellable,
+            status: "Active".to_string(),
+        });
+    }
+    for (_, order) in &result.taker_orders {
+        entries.push(app::MyOrderEntry {
+            uuid: order.request.uuid.clone(),
+            order_type: "Taker".to_string(),
+            base: order.request.base.clone(),
+            rel: order.request.rel.clone(),
+            price: {
+                let base_f = order.request.base_amount.parse::<f64>().unwrap_or(1.0);
+                let rel_f = order.request.rel_amount.parse::<f64>().unwrap_or(0.0);
+                if base_f > 0.0 {
+                    format!("{:.8}", rel_f / base_f)
+                } else {
+                    "0".to_string()
+                }
+            },
+            volume: order.request.base_amount.clone(),
+            cancellable: order.cancellable,
+            status: "Active".to_string(),
+        });
+    }
+    entries
+}
+
 async fn run_app<B: Backend>(
     terminal: &mut Terminal<B>,
     app_state: Arc<RwLock<App>>,
@@ -744,6 +782,102 @@ async fn run_app<B: Backend>(
                                     }
                                     _ => {}
                                 }
+                            } else if app.maker_order_modal().is_some() {
+                                // --- Maker order modal key handling ---
+                                match key.code {
+                                    KeyCode::Esc => {
+                                        app.close_maker_order_modal();
+                                    }
+                                    KeyCode::Enter => {
+                                        match app.maker_order_modal() {
+                                            Some(app::MakerOrderModal::EnteringVolume { .. }) => {
+                                                app.maker_order_modal_confirm_volume();
+                                            }
+                                            Some(app::MakerOrderModal::EnteringPrice { .. }) => {
+                                                app.maker_order_modal_confirm_price();
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+                                    KeyCode::Char('y') | KeyCode::Char('Y') => {
+                                        if let Some(params) = app.maker_order_modal_confirm_send() {
+                                            let (base, rel, volume, price, base_confs, base_nota, rel_confs, rel_nota) = params;
+                                            drop(app);
+                                            if let Ok(mut log) = logger.write() {
+                                                log.info(format!("Placing maker order: sell {} {} at price {} {}/{}",
+                                                    volume, base, price, rel, base));
+                                            }
+                                            match kdf_client::setprice(
+                                                &rpc_password, &base, &rel, &price, &volume,
+                                                base_confs, base_nota, rel_confs, rel_nota,
+                                            ).await {
+                                                Ok(res) => {
+                                                    let msg = format!(
+                                                        "Order placed successfully!\n\nUUID: {}\nSell: {} {}\nPrice: {} {}/{}\nGet: {} {}\nMin volume: {} {}",
+                                                        res.result.uuid,
+                                                        res.result.max_base_vol, base,
+                                                        res.result.price, rel, base,
+                                                        {
+                                                            let v = res.result.max_base_vol.parse::<f64>().unwrap_or(0.0);
+                                                            let p = res.result.price.parse::<f64>().unwrap_or(0.0);
+                                                            format!("{:.8}", v * p)
+                                                        },
+                                                        rel,
+                                                        res.result.min_base_vol, base,
+                                                    );
+                                                    if let Ok(mut a) = app_state.write() {
+                                                        a.maker_order_modal_set_result(true, msg);
+                                                    }
+                                                    if let Ok(mut log) = logger.write() {
+                                                        log.info(format!("Maker order placed: {}", res.result.uuid));
+                                                    }
+                                                    // Refresh my_orders
+                                                    if let Ok(orders_res) = kdf_client::my_orders(&rpc_password).await {
+                                                        let entries = build_my_order_entries(&orders_res.result);
+                                                        if let Ok(mut a) = app_state.write() {
+                                                            a.update_my_orders(entries);
+                                                        }
+                                                    }
+                                                    // Refresh orderbook
+                                                    if let Ok(app_r) = app_state.read() {
+                                                        if let Some((ob_base, ob_rel)) = app_r.swaps_selected_pair() {
+                                                            drop(app_r);
+                                                            if let Ok(ob_res) = kdf_client::orderbook(&rpc_password, &ob_base, &ob_rel).await {
+                                                                if let Ok(mut a) = app_state.write() {
+                                                                    a.set_orderbook(app::OrderbookData {
+                                                                        asks: ob_res.result.asks,
+                                                                        bids: ob_res.result.bids,
+                                                                        base: ob_res.result.base,
+                                                                        rel: ob_res.result.rel,
+                                                                        num_asks: ob_res.result.num_asks,
+                                                                        num_bids: ob_res.result.num_bids,
+                                                                        total_asks_base_vol: ob_res.result.total_asks_base_vol.decimal,
+                                                                        total_bids_base_vol: ob_res.result.total_bids_base_vol.decimal,
+                                                                    });
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                                Err(e) => {
+                                                    if let Ok(mut a) = app_state.write() {
+                                                        a.maker_order_modal_set_result(false, format!("Failed: {}", e));
+                                                    }
+                                                    if let Ok(mut log) = logger.write() {
+                                                        log.error(format!("setprice failed: {}", e));
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                        app.maker_order_modal_push_char(c);
+                                    }
+                                    KeyCode::Backspace => {
+                                        app.maker_order_modal_backspace();
+                                    }
+                                    _ => {}
+                                }
                             } else if app.active_screen() == app::ActiveScreen::Swaps {
                                 // --- Swaps screen key handling ---
                                 match key.code {
@@ -797,12 +931,22 @@ async fn run_app<B: Backend>(
                                                     }
                                                 }
                                             }
+                                            // Also refresh my_orders
+                                            if let Ok(orders_res) = kdf_client::my_orders(&rpc_password).await {
+                                                let entries = build_my_order_entries(&orders_res.result);
+                                                if let Ok(mut a) = app_state.write() {
+                                                    a.update_my_orders(entries);
+                                                }
+                                            }
                                         } else {
                                             drop(app);
                                             if let Ok(mut log) = logger.write() {
                                                 log.warn("Select different base and rel coins (need at least 2 activated)".to_string());
                                             }
                                         }
+                                    }
+                                    KeyCode::Char('m') | KeyCode::Char('M') => {
+                                        app.open_maker_order_modal();
                                     }
                                     KeyCode::Char('q') | KeyCode::Char('Q') | KeyCode::Esc => {
                                         // Go back to Main screen instead of quitting
