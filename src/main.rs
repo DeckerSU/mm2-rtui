@@ -784,6 +784,14 @@ async fn run_app<B: Backend>(
                                     }
                                     _ => {}
                                 }
+                            } else if app.order_info_modal().is_some() {
+                                // --- Order info modal key handling ---
+                                match key.code {
+                                    KeyCode::Esc => {
+                                        app.close_order_info_modal();
+                                    }
+                                    _ => {}
+                                }
                             } else if app.maker_order_modal().is_some() {
                                 // --- Maker order modal key handling ---
                                 match key.code {
@@ -896,54 +904,113 @@ async fn run_app<B: Backend>(
                                         app.swaps_select_down();
                                     }
                                     KeyCode::Enter => {
-                                        // Fetch orderbook for selected pair
-                                        if let Some((base, rel)) = app.swaps_selected_pair() {
-                                            app.set_orderbook_loading(true);
-                                            drop(app);
-                                            if let Ok(mut log) = logger.write() {
-                                                log.info(format!("Fetching orderbook {}/{}...", base, rel));
-                                            }
-                                            match kdf_client::orderbook(&rpc_password, &base, &rel).await {
-                                                Ok(res) => {
-                                                    if let Ok(mut a) = app_state.write() {
-                                                        a.set_orderbook(app::OrderbookData {
-                                                            asks: res.result.asks,
-                                                            bids: res.result.bids,
-                                                            base: res.result.base,
-                                                            rel: res.result.rel,
-                                                            num_asks: res.result.num_asks,
-                                                            num_bids: res.result.num_bids,
-                                                            total_asks_base_vol: res.result.total_asks_base_vol.decimal,
-                                                            total_bids_base_vol: res.result.total_bids_base_vol.decimal,
-                                                        });
-                                                    }
-                                                    if let Ok(mut log) = logger.write() {
-                                                        log.info(format!(
-                                                            "Orderbook {}/{}: {} asks, {} bids",
-                                                            base, rel, res.result.num_asks, res.result.num_bids
-                                                        ));
-                                                    }
+                                        if app.swaps_focus() == app::SwapsCoinFocus::Orders {
+                                            // Fetch order_status for selected order
+                                            if let Some(uuid) = app.selected_order_uuid() {
+                                                app.open_order_info_modal(app::OrderInfoModal::Loading);
+                                                drop(app);
+                                                if let Ok(mut log) = logger.write() {
+                                                    log.info(format!("Fetching order status for {}...", uuid));
                                                 }
-                                                Err(e) => {
-                                                    if let Ok(mut a) = app_state.write() {
-                                                        a.set_orderbook_error(format!("{}", e));
+                                                match kdf_client::order_status(&rpc_password, &uuid).await {
+                                                    Ok(resp) => {
+                                                        let modal = match resp {
+                                                            kdf_client::OrderStatusResponse::Maker { order } => {
+                                                                app::OrderInfoModal::MakerOrder {
+                                                                    uuid: order.uuid,
+                                                                    base: order.base,
+                                                                    rel: order.rel,
+                                                                    price: order.price,
+                                                                    max_base_vol: order.max_base_vol,
+                                                                    min_base_vol: order.min_base_vol,
+                                                                    available_amount: order.available_amount.unwrap_or_default(),
+                                                                    created_at: order.created_at,
+                                                                    updated_at: order.updated_at,
+                                                                    cancellable: order.cancellable,
+                                                                    cancellation_reason: order.cancellation_reason,
+                                                                    started_swaps: order.started_swaps,
+                                                                    conf_settings: order.conf_settings.map(|c| (c.base_confs, c.base_nota, c.rel_confs, c.rel_nota)),
+                                                                }
+                                                            }
+                                                            kdf_client::OrderStatusResponse::Taker { order, cancellation_reason } => {
+                                                                app::OrderInfoModal::TakerOrder {
+                                                                    uuid: order.request.uuid,
+                                                                    base: order.request.base,
+                                                                    rel: order.request.rel,
+                                                                    base_amount: order.request.base_amount,
+                                                                    rel_amount: order.request.rel_amount,
+                                                                    action: order.request.action,
+                                                                    created_at: order.created_at,
+                                                                    cancellable: order.cancellable,
+                                                                    order_type: order.order_type.map(|t| t.order_type),
+                                                                    cancellation_reason,
+                                                                }
+                                                            }
+                                                        };
+                                                        if let Ok(mut a) = app_state.write() {
+                                                            a.open_order_info_modal(modal);
+                                                        }
                                                     }
-                                                    if let Ok(mut log) = logger.write() {
-                                                        log.error(format!("Orderbook error: {}", e));
+                                                    Err(e) => {
+                                                        if let Ok(mut a) = app_state.write() {
+                                                            a.open_order_info_modal(app::OrderInfoModal::Error(format!("{}", e)));
+                                                        }
+                                                        if let Ok(mut log) = logger.write() {
+                                                            log.error(format!("order_status error: {}", e));
+                                                        }
                                                     }
-                                                }
-                                            }
-                                            // Also refresh my_orders
-                                            if let Ok(orders_res) = kdf_client::my_orders(&rpc_password).await {
-                                                let entries = build_my_order_entries(&orders_res.result);
-                                                if let Ok(mut a) = app_state.write() {
-                                                    a.update_my_orders(entries);
                                                 }
                                             }
                                         } else {
-                                            drop(app);
-                                            if let Ok(mut log) = logger.write() {
-                                                log.warn("Select different base and rel coins (need at least 2 activated)".to_string());
+                                            // Fetch orderbook for selected pair
+                                            if let Some((base, rel)) = app.swaps_selected_pair() {
+                                                app.set_orderbook_loading(true);
+                                                drop(app);
+                                                if let Ok(mut log) = logger.write() {
+                                                    log.info(format!("Fetching orderbook {}/{}...", base, rel));
+                                                }
+                                                match kdf_client::orderbook(&rpc_password, &base, &rel).await {
+                                                    Ok(res) => {
+                                                        if let Ok(mut a) = app_state.write() {
+                                                            a.set_orderbook(app::OrderbookData {
+                                                                asks: res.result.asks,
+                                                                bids: res.result.bids,
+                                                                base: res.result.base,
+                                                                rel: res.result.rel,
+                                                                num_asks: res.result.num_asks,
+                                                                num_bids: res.result.num_bids,
+                                                                total_asks_base_vol: res.result.total_asks_base_vol.decimal,
+                                                                total_bids_base_vol: res.result.total_bids_base_vol.decimal,
+                                                            });
+                                                        }
+                                                        if let Ok(mut log) = logger.write() {
+                                                            log.info(format!(
+                                                                "Orderbook {}/{}: {} asks, {} bids",
+                                                                base, rel, res.result.num_asks, res.result.num_bids
+                                                            ));
+                                                        }
+                                                    }
+                                                    Err(e) => {
+                                                        if let Ok(mut a) = app_state.write() {
+                                                            a.set_orderbook_error(format!("{}", e));
+                                                        }
+                                                        if let Ok(mut log) = logger.write() {
+                                                            log.error(format!("Orderbook error: {}", e));
+                                                        }
+                                                    }
+                                                }
+                                                // Also refresh my_orders
+                                                if let Ok(orders_res) = kdf_client::my_orders(&rpc_password).await {
+                                                    let entries = build_my_order_entries(&orders_res.result);
+                                                    if let Ok(mut a) = app_state.write() {
+                                                        a.update_my_orders(entries);
+                                                    }
+                                                }
+                                            } else {
+                                                drop(app);
+                                                if let Ok(mut log) = logger.write() {
+                                                    log.warn("Select different base and rel coins (need at least 2 activated)".to_string());
+                                                }
                                             }
                                         }
                                     }
@@ -988,12 +1055,19 @@ async fn run_app<B: Backend>(
                                             }
                                         }
                                     }
+                                    KeyCode::Char('i') | KeyCode::Char('I') => {
+                                        app.enter_orders_focus();
+                                    }
                                     KeyCode::Char('m') | KeyCode::Char('M') => {
                                         app.open_maker_order_modal();
                                     }
                                     KeyCode::Char('q') | KeyCode::Char('Q') | KeyCode::Esc => {
-                                        // Go back to Main screen instead of quitting
-                                        app.toggle_screen();
+                                        if app.swaps_focus() == app::SwapsCoinFocus::Orders {
+                                            app.exit_orders_focus();
+                                        } else {
+                                            // Go back to Main screen instead of quitting
+                                            app.toggle_screen();
+                                        }
                                     }
                                     KeyCode::PageUp => {
                                         let entry_count = logger.read().map(|l| l.get_entries().len()).unwrap_or(0);

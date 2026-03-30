@@ -682,6 +682,96 @@ pub async fn my_orders(userpass: &str) -> Result<MyOrdersResponse> {
     Ok(body)
 }
 
+// --- order_status ---
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct OrderStatusMakerOrder {
+    pub base: String,
+    pub rel: String,
+    pub price: String,
+    pub max_base_vol: String,
+    pub min_base_vol: String,
+    #[serde(default)]
+    pub available_amount: Option<String>,
+    pub created_at: u64,
+    #[serde(default)]
+    pub updated_at: Option<u64>,
+    pub uuid: String,
+    #[serde(default)]
+    pub cancellable: bool,
+    #[serde(default)]
+    pub started_swaps: Vec<String>,
+    pub conf_settings: Option<ConfSettings>,
+    #[serde(default)]
+    pub cancellation_reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct OrderStatusTakerRequest {
+    pub base: String,
+    pub rel: String,
+    pub base_amount: String,
+    pub rel_amount: String,
+    pub action: String,
+    pub uuid: String,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct OrderStatusTakerOrderType {
+    #[serde(rename = "type")]
+    pub order_type: String,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct OrderStatusTakerOrder {
+    pub created_at: u64,
+    pub request: OrderStatusTakerRequest,
+    #[serde(default)]
+    pub cancellable: bool,
+    pub order_type: Option<OrderStatusTakerOrderType>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+#[serde(tag = "type")]
+pub enum OrderStatusResponse {
+    Maker {
+        order: OrderStatusMakerOrder,
+    },
+    Taker {
+        order: OrderStatusTakerOrder,
+        #[serde(default)]
+        cancellation_reason: Option<String>,
+    },
+}
+
+pub async fn order_status(userpass: &str, uuid: &str) -> Result<OrderStatusResponse> {
+    let client = reqwest::Client::new();
+    let request = serde_json::json!({
+        "method": "order_status",
+        "userpass": userpass,
+        "uuid": uuid,
+    });
+    let response = client
+        .post(KDF_RPC_URL)
+        .json(&request)
+        .send()
+        .await
+        .context("Failed to send order_status request to KDF")?;
+    let text = response
+        .text()
+        .await
+        .context("Failed to read order_status response body")?;
+    log_rpc_response("order_status", &text);
+    if let Ok(err) = serde_json::from_str::<Value>(&text) {
+        if let Some(error) = err.get("error") {
+            anyhow::bail!("{}", error);
+        }
+    }
+    let body: OrderStatusResponse =
+        serde_json::from_str(&text).context("Failed to parse order_status response from KDF")?;
+    Ok(body)
+}
+
 /// send_raw_transaction request (legacy API)
 #[derive(Debug, Serialize)]
 struct SendRawTransactionRequest {

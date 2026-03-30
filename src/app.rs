@@ -23,6 +23,7 @@ pub enum ActiveScreen {
 pub enum SwapsCoinFocus {
     Base,
     Rel,
+    Orders,
 }
 
 /// Cached orderbook data.
@@ -97,6 +98,40 @@ pub struct MyOrderEntry {
     pub volume: String,
     pub cancellable: bool,
     pub status: String,      // placeholder for now
+}
+
+/// Order info modal content from order_status RPC.
+#[derive(Debug, Clone)]
+pub enum OrderInfoModal {
+    Loading,
+    MakerOrder {
+        uuid: String,
+        base: String,
+        rel: String,
+        price: String,
+        max_base_vol: String,
+        min_base_vol: String,
+        available_amount: String,
+        created_at: u64,
+        updated_at: Option<u64>,
+        cancellable: bool,
+        cancellation_reason: Option<String>,
+        started_swaps: Vec<String>,
+        conf_settings: Option<(u32, bool, u32, bool)>,
+    },
+    TakerOrder {
+        uuid: String,
+        base: String,
+        rel: String,
+        base_amount: String,
+        rel_amount: String,
+        action: String,
+        created_at: u64,
+        cancellable: bool,
+        order_type: Option<String>,
+        cancellation_reason: Option<String>,
+    },
+    Error(String),
 }
 
 /// State of the wallet selection modal: either choosing a wallet or entering its password.
@@ -266,6 +301,10 @@ pub struct App {
     maker_order_modal: Option<MakerOrderModal>,
     /// My orders list (maker + taker).
     my_orders: Vec<MyOrderEntry>,
+    /// Selected index in my_orders list (when focus is Orders).
+    orders_selected_index: usize,
+    /// Order info modal content (from order_status RPC).
+    order_info_modal: Option<OrderInfoModal>,
 }
 
 impl App {
@@ -300,6 +339,8 @@ impl App {
             orderbook_error: None,
             maker_order_modal: None,
             my_orders: Vec::new(),
+            orders_selected_index: 0,
+            order_info_modal: None,
         }
     }
 
@@ -776,7 +817,7 @@ impl App {
     pub fn swaps_toggle_focus(&mut self) {
         self.swaps_focus = match self.swaps_focus {
             SwapsCoinFocus::Base => SwapsCoinFocus::Rel,
-            SwapsCoinFocus::Rel => SwapsCoinFocus::Base,
+            SwapsCoinFocus::Rel | SwapsCoinFocus::Orders => SwapsCoinFocus::Base,
         };
     }
 
@@ -809,6 +850,14 @@ impl App {
                     self.swaps_rel_index = activated.len() - 1;
                 }
             }
+            SwapsCoinFocus::Orders => {
+                if self.my_orders.is_empty() { return; }
+                if self.orders_selected_index > 0 {
+                    self.orders_selected_index -= 1;
+                } else {
+                    self.orders_selected_index = self.my_orders.len() - 1;
+                }
+            }
         }
     }
 
@@ -823,6 +872,10 @@ impl App {
             }
             SwapsCoinFocus::Rel => {
                 self.swaps_rel_index = (self.swaps_rel_index + 1) % activated.len();
+            }
+            SwapsCoinFocus::Orders => {
+                if self.my_orders.is_empty() { return; }
+                self.orders_selected_index = (self.orders_selected_index + 1) % self.my_orders.len();
             }
         }
     }
@@ -1025,10 +1078,47 @@ impl App {
 
     pub fn update_my_orders(&mut self, orders: Vec<MyOrderEntry>) {
         self.my_orders = orders;
+        if self.orders_selected_index >= self.my_orders.len() && !self.my_orders.is_empty() {
+            self.orders_selected_index = self.my_orders.len() - 1;
+        }
+        if self.my_orders.is_empty() && self.swaps_focus == SwapsCoinFocus::Orders {
+            self.swaps_focus = SwapsCoinFocus::Base;
+        }
     }
 
     pub fn my_orders_list(&self) -> &[MyOrderEntry] {
         &self.my_orders
+    }
+
+    pub fn enter_orders_focus(&mut self) {
+        if !self.my_orders.is_empty() {
+            self.swaps_focus = SwapsCoinFocus::Orders;
+            self.orders_selected_index = 0;
+        }
+    }
+
+    pub fn exit_orders_focus(&mut self) {
+        self.swaps_focus = SwapsCoinFocus::Base;
+    }
+
+    pub fn orders_selected_index(&self) -> usize {
+        self.orders_selected_index
+    }
+
+    pub fn selected_order_uuid(&self) -> Option<String> {
+        self.my_orders.get(self.orders_selected_index).map(|o| o.uuid.clone())
+    }
+
+    pub fn open_order_info_modal(&mut self, info: OrderInfoModal) {
+        self.order_info_modal = Some(info);
+    }
+
+    pub fn close_order_info_modal(&mut self) {
+        self.order_info_modal = None;
+    }
+
+    pub fn order_info_modal(&self) -> &Option<OrderInfoModal> {
+        &self.order_info_modal
     }
 
     /// Format a decimal string to at most `max_decimals` decimal places, trimming trailing zeros.
@@ -1225,9 +1315,14 @@ impl App {
         }
 
         // --- My Orders ---
+        let orders_title = if self.swaps_focus == SwapsCoinFocus::Orders {
+            " My Orders (Enter - info, Esc - back) "
+        } else {
+            " My Orders (I - select, M - new maker order) "
+        };
         let orders_block = Block::default()
             .borders(Borders::ALL)
-            .title(" My Orders (M - new maker order) ");
+            .title(orders_title);
         let orders_inner = orders_block.inner(swaps_chunks[2]);
         f.render_widget(orders_block, swaps_chunks[2]);
 
@@ -1246,7 +1341,8 @@ impl App {
                     Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD),
                 ),
             ]));
-            for order in &self.my_orders {
+            let in_orders_focus = self.swaps_focus == SwapsCoinFocus::Orders;
+            for (i, order) in self.my_orders.iter().enumerate() {
                 let vol_f = order.volume.parse::<f64>().unwrap_or(0.0);
                 let price_f = order.price.parse::<f64>().unwrap_or(0.0);
                 let total_f = vol_f * price_f;
@@ -1255,13 +1351,15 @@ impl App {
                 let total = format!("{:.8}", total_f);
                 let pair = format!("{}→{}", order.base, order.rel);
                 let type_color = if order.order_type == "Maker" { Color::Cyan } else { Color::Magenta };
+                let is_selected = in_orders_focus && i == self.orders_selected_index;
+                let bg = if is_selected { Color::DarkGray } else { Color::Reset };
                 lines.push(Line::from(vec![
-                    Span::styled(format!(" {:>6}", order.order_type), Style::default().fg(type_color)),
-                    Span::raw(format!(" {:>12}", pair)),
-                    Span::styled(format!(" {:>10}", vol), Style::default().fg(Color::White)),
-                    Span::styled(format!(" {:>18}", price_fmt), Style::default().fg(Color::Yellow)),
-                    Span::styled(format!(" {:>18}", total), Style::default().fg(Color::Green)),
-                    Span::raw(format!("  {}", order.uuid)),
+                    Span::styled(format!(" {:>6}", order.order_type), Style::default().fg(type_color).bg(bg)),
+                    Span::styled(format!(" {:>12}", pair), Style::default().bg(bg)),
+                    Span::styled(format!(" {:>10}", vol), Style::default().fg(Color::White).bg(bg)),
+                    Span::styled(format!(" {:>18}", price_fmt), Style::default().fg(Color::Yellow).bg(bg)),
+                    Span::styled(format!(" {:>18}", total), Style::default().fg(Color::Green).bg(bg)),
+                    Span::styled(format!("  {}", order.uuid), Style::default().bg(bg)),
                 ]));
             }
             let para = Paragraph::new(lines)
@@ -2230,5 +2328,121 @@ impl App {
                 }
             }
         }
+
+        // Order info modal
+        if let Some(ref info) = self.order_info_modal {
+            let area = f.size();
+            let modal_w = 74.min(area.width.saturating_sub(4));
+            let modal_h = 24.min(area.height.saturating_sub(4));
+            let x = area.width.saturating_sub(modal_w) / 2;
+            let y = area.height.saturating_sub(modal_h) / 2;
+            let modal_rect = Rect::new(x, y, modal_w, modal_h);
+
+            f.render_widget(Clear, modal_rect);
+            let title = match info {
+                OrderInfoModal::Loading => " Order Info (loading...) ",
+                OrderInfoModal::MakerOrder { .. } => " Maker Order Info (Esc to close) ",
+                OrderInfoModal::TakerOrder { .. } => " Taker Order Info (Esc to close) ",
+                OrderInfoModal::Error(_) => " Order Info Error (Esc to close) ",
+            };
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Cyan))
+                .title(title);
+            let inner = block.inner(modal_rect);
+            f.render_widget(block, modal_rect);
+
+            let mut content: Vec<Line> = Vec::new();
+            match info {
+                OrderInfoModal::Loading => {
+                    content.push(Line::from("Loading order status..."));
+                }
+                OrderInfoModal::MakerOrder {
+                    uuid, base, rel, price, max_base_vol, min_base_vol,
+                    available_amount, created_at, updated_at, cancellable,
+                    cancellation_reason, started_swaps, conf_settings,
+                } => {
+                    content.push(Self::label_value("UUID", uuid));
+                    content.push(Self::label_value("Pair", &format!("{}/{}", base, rel)));
+                    content.push(Self::label_value("Price", price));
+                    content.push(Self::label_value("Max Volume", max_base_vol));
+                    content.push(Self::label_value("Min Volume", min_base_vol));
+                    content.push(Self::label_value("Available", available_amount));
+                    content.push(Self::label_value("Created", &Self::format_timestamp(*created_at)));
+                    if let Some(ts) = updated_at {
+                        content.push(Self::label_value("Updated", &Self::format_timestamp(*ts)));
+                    }
+                    content.push(Self::label_value("Cancellable", if *cancellable { "yes" } else { "no" }));
+                    if let Some(reason) = cancellation_reason {
+                        content.push(Self::label_value("Cancel Reason", reason));
+                    }
+                    if let Some((bc, bn, rc, rn)) = conf_settings {
+                        content.push(Line::from(""));
+                        content.push(Self::label_value("Base Confs", &format!("{} (nota: {})", bc, bn)));
+                        content.push(Self::label_value("Rel Confs", &format!("{} (nota: {})", rc, rn)));
+                    }
+                    if !started_swaps.is_empty() {
+                        content.push(Line::from(""));
+                        content.push(Line::from(Span::styled(
+                            "Started Swaps:",
+                            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                        )));
+                        for s in started_swaps {
+                            content.push(Line::from(format!("  {}", s)));
+                        }
+                    }
+                }
+                OrderInfoModal::TakerOrder {
+                    uuid, base, rel, base_amount, rel_amount, action,
+                    created_at, cancellable, order_type, cancellation_reason,
+                } => {
+                    content.push(Self::label_value("UUID", uuid));
+                    content.push(Self::label_value("Pair", &format!("{}/{}", base, rel)));
+                    content.push(Self::label_value("Action", action));
+                    content.push(Self::label_value("Base Amount", base_amount));
+                    content.push(Self::label_value("Rel Amount", rel_amount));
+                    content.push(Self::label_value("Created", &Self::format_timestamp(*created_at)));
+                    content.push(Self::label_value("Cancellable", if *cancellable { "yes" } else { "no" }));
+                    if let Some(ot) = order_type {
+                        content.push(Self::label_value("Order Type", ot));
+                    }
+                    if let Some(reason) = cancellation_reason {
+                        content.push(Self::label_value("Cancellation", reason));
+                    }
+                }
+                OrderInfoModal::Error(msg) => {
+                    content.push(Line::from(Span::styled(
+                        msg.clone(),
+                        Style::default().fg(Color::Red),
+                    )));
+                }
+            }
+            content.push(Line::from(""));
+            content.push(Line::from(Span::styled(
+                "Press Esc to close",
+                Style::default().fg(Color::DarkGray),
+            )));
+
+            let para = Paragraph::new(content)
+                .style(Style::default().fg(Color::White));
+            f.render_widget(para, inner);
+        }
+    }
+
+    fn label_value<'a>(label: &str, value: &str) -> Line<'a> {
+        Line::from(vec![
+            Span::styled(
+                format!("{:>14}: ", label),
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(value.to_string()),
+        ])
+    }
+
+    fn format_timestamp(ts: u64) -> String {
+        use chrono::{DateTime, Utc};
+        DateTime::<Utc>::from_timestamp(ts as i64, 0)
+            .map(|dt| dt.format("%Y-%m-%d %H:%M:%S UTC").to_string())
+            .unwrap_or_else(|| ts.to_string())
     }
 }
