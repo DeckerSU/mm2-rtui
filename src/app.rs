@@ -1240,32 +1240,28 @@ impl App {
             // Header
             lines.push(Line::from(vec![
                 Span::styled(
-                    format!(" {:6} {:8} {:>12} {:>12} {:>12}  {:36} ",
-                        "Type", "Pair", "Volume", "Price", "Total", "UUID"
+                    format!(" {:>6} {:>12} {:>10} {:>18} {:>18}  UUID",
+                        "Type", "Pair", "Volume", "Price", "Total"
                     ),
                     Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD),
                 ),
             ]));
             for order in &self.my_orders {
-                let total_f = order.volume.parse::<f64>().unwrap_or(0.0)
-                    * order.price.parse::<f64>().unwrap_or(0.0);
-                let total = Self::fmt_decimal(&format!("{:.8}", total_f), 8);
-                let pair = format!("{}→{}", order.base, order.rel);
+                let vol_f = order.volume.parse::<f64>().unwrap_or(0.0);
+                let price_f = order.price.parse::<f64>().unwrap_or(0.0);
+                let total_f = vol_f * price_f;
                 let vol = Self::fmt_decimal(&order.volume, 8);
-                let price_fmt = Self::fmt_decimal(&order.price, 8);
+                let price_fmt = format!("{:.8}", price_f);
+                let total = format!("{:.8}", total_f);
+                let pair = format!("{}→{}", order.base, order.rel);
                 let type_color = if order.order_type == "Maker" { Color::Cyan } else { Color::Magenta };
-                let uuid_short = if order.uuid.len() > 8 {
-                    &order.uuid[..8]
-                } else {
-                    &order.uuid
-                };
                 lines.push(Line::from(vec![
-                    Span::styled(format!(" {:6}", order.order_type), Style::default().fg(type_color)),
-                    Span::raw(format!(" {:8}", pair)),
-                    Span::styled(format!(" {:>12}", vol), Style::default().fg(Color::White)),
-                    Span::styled(format!(" {:>12}", price_fmt), Style::default().fg(Color::Yellow)),
-                    Span::styled(format!(" {:>12}", total), Style::default().fg(Color::Green)),
-                    Span::raw(format!("  {}…", uuid_short)),
+                    Span::styled(format!(" {:>6}", order.order_type), Style::default().fg(type_color)),
+                    Span::raw(format!(" {:>12}", pair)),
+                    Span::styled(format!(" {:>10}", vol), Style::default().fg(Color::White)),
+                    Span::styled(format!(" {:>18}", price_fmt), Style::default().fg(Color::Yellow)),
+                    Span::styled(format!(" {:>18}", total), Style::default().fg(Color::Green)),
+                    Span::raw(format!("  {}", order.uuid)),
                 ]));
             }
             let para = Paragraph::new(lines)
