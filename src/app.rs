@@ -2441,7 +2441,9 @@ impl App {
 
     fn format_timestamp(ts: u64) -> String {
         use chrono::{DateTime, Utc};
-        DateTime::<Utc>::from_timestamp(ts as i64, 0)
+        // KDF returns timestamps in milliseconds
+        let secs = (ts / 1000) as i64;
+        DateTime::<Utc>::from_timestamp(secs, 0)
             .map(|dt| dt.format("%Y-%m-%d %H:%M:%S UTC").to_string())
             .unwrap_or_else(|| ts.to_string())
     }
